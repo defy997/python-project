@@ -1,6 +1,5 @@
 """
 模块名称：app.py
-作者信息：沈宏舟（示例），学号：2025000000
 模块功能：Flask 后端入口，负责：
     1. 提供前端网页（模板渲染）；
     2. 接收前端上传的金融数据 / 文本；
@@ -12,9 +11,16 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
+import numpy as np
+import pandas as pd
+import requests
 from flask import (
     Flask,
     jsonify,
@@ -22,7 +28,6 @@ from flask import (
     request,
     send_from_directory,
 )
-import pandas as pd
 
 from analysis import (
     OUTPUT_DIR,
@@ -42,13 +47,85 @@ from crawler_ml import (
     run_regression,
     save_to_mysql,
 )
+from utils import handle_api_errors, logger, validate_dataframe
+
+try:
+    import tushare as ts
+except ImportError:  # pragma: no cover
+    ts = None
 
 
 BASE_DIR = Path(__file__).parent           # 当前项目根目录
 TEMPLATE_DIR = BASE_DIR / "templates"      # HTML 模板目录
 STATIC_DIR = BASE_DIR / "static"           # 静态资源目录
 
+# 默认使用用户提供的 TuShare Token，可通过环境变量覆盖
+TUSHARE_TOKEN = os.getenv(
+    "TUSHARE_TOKEN",
+    "9d41733e4997a12f4eac28b57f9d1337eacad86f5f980ebe5370162f",
+)
+
 app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR))
+
+
+def _extract_text_list_from_df(df: pd.DataFrame) -> List[str]:
+    """将 DataFrame 中的文本列拼接成列表，供词云/情感分析使用。"""
+    texts: List[str] = []
+    for col in df.columns:
+        if df[col].dtype == object:
+            texts.extend(df[col].astype(str).tolist())
+    return [t for t in texts if isinstance(t, str) and t.strip()]
+
+
+def _build_texts_from_request() -> Tuple[List[str], str]:
+    """
+    根据前端提交内容获取文本数据列表。
+    优先顺序：上传文件 > 文本粘贴 > MySQL 表（可选） > 内置示例。
+    返回 (texts, source_desc)
+    """
+    # 1) 上传 CSV
+    if "file" in request.files:
+        f = request.files["file"]
+        if f and f.filename.endswith(".csv"):
+            try:
+                df = pd.read_csv(f, encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                f.stream.seek(0)
+                df = pd.read_csv(f, encoding="gbk")
+            return _extract_text_list_from_df(df), "上传文件"
+
+    # 2) 文本框
+    raw_text = request.form.get("text_data", "").strip()
+    if raw_text:
+        return raw_text.splitlines(), "文本框"
+
+    # 3) MySQL 表
+    table_name = request.form.get("table_name", "").strip()
+    if table_name:
+        try:
+            df = load_from_mysql(table_name)
+            return _extract_text_list_from_df(df), f"MySQL:{table_name}"
+        except Exception:
+            pass
+
+    # 4) 内置示例：使用新闻关键词“金融”
+    df_news = crawl_financial_news("金融")
+    return _extract_text_list_from_df(df_news), "示例新闻"
+
+
+def _tokenize_texts(texts: List[str]) -> Counter:
+    """
+    简单分词：按非中英文/数字拆分，再统计词频。
+    若有 jieba 可替换为更优分词，这里保持零依赖。
+    """
+    counter: Counter = Counter()
+    pattern = re.compile(r"[A-Za-z0-9\u4e00-\u9fa5]+")
+    for t in texts:
+        for m in pattern.findall(t):
+            # 过滤过短词
+            if len(m.strip()) >= 2:
+                counter[m.strip().lower()] += 1
+    return counter
 
 
 @app.route("/", methods=["GET"])
@@ -112,36 +189,59 @@ def _build_df_from_request() -> pd.DataFrame:
 
 
 @app.route("/analyze", methods=["POST"])
+@handle_api_errors
 def analyze() -> Any:
     """
     函数名称：analyze
-    函数功能：处理前端的“开始分析”请求，执行数据分析和 AI 文本分析，并返回 JSON 结构。
+    函数功能：处理前端的"开始分析"请求，执行数据分析和 AI 文本分析，并返回 JSON 结构。
     参数说明：
         无（从 request.form / request.files 读取）。
     返回值：
         Flask Response：包含分析结果的 JSON 响应。
     """
+    logger.info("收到分析请求")
+    
     # 从请求中获取用户选定的列信息
-    x_col = request.form.get("x_col", "")
-    y_col = request.form.get("y_col", "")
+    x_col = request.form.get("x_col", "").strip()
+    y_col = request.form.get("y_col", "").strip()
 
     # 构建 DataFrame
-    df = _build_df_from_request()
+    try:
+        df = _build_df_from_request()
+    except Exception as e:
+        logger.error(f"构建 DataFrame 失败: {e}")
+        return jsonify({"status": "error", "msg": f"数据读取失败: {str(e)}"}), 400
+
+    # 验证数据
+    validation = validate_dataframe(df, min_rows=2)
+    if not validation["valid"]:
+        return jsonify({"status": "error", "msg": validation["msg"]}), 400
 
     # 如果未指定列名，简单取前两列作为 X/Y
     if not x_col or x_col not in df.columns:
         x_col = df.columns[0]
+        logger.info(f"自动选择 X 轴列: {x_col}")
     if not y_col or y_col not in df.columns:
-        y_col = df.columns[1]
+        y_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+        logger.info(f"自动选择 Y 轴列: {y_col}")
 
     # 调用数据分析模块
-    result: AnalysisResult = analyze_financial_dataframe(df, x_col, y_col)
+    try:
+        result: AnalysisResult = analyze_financial_dataframe(df, x_col, y_col)
+    except Exception as e:
+        logger.error(f"数据分析失败: {e}")
+        return jsonify({"status": "error", "msg": f"数据分析失败: {str(e)}"}), 500
 
     # 文本与 AI 分析相关
     raw_text = request.form.get("doc_text", "").strip()
     if raw_text:
-        summary = summarize_financial_text(raw_text)      # AI 摘要
-        sentiment = analyze_sentiment(raw_text)           # 情感分析
+        try:
+            summary = summarize_financial_text(raw_text)      # AI 摘要
+            sentiment = analyze_sentiment(raw_text)           # 情感分析
+        except Exception as e:
+            logger.warning(f"AI 分析失败: {e}")
+            summary = "AI 分析暂时不可用"
+            sentiment = {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
     else:
         summary = ""
         sentiment = {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
@@ -159,6 +259,7 @@ def analyze() -> Any:
         "sentiment": sentiment,       # 情感分析分布
     }
 
+    logger.info("分析完成，返回结果")
     return jsonify(payload)  # 返回 JSON 响应
 
 
@@ -176,6 +277,7 @@ def download_file(filename: str):
 
 
 @app.route("/api/crawl_news", methods=["POST"])
+@handle_api_errors
 def api_crawl_news():
     """
     函数名称：api_crawl_news
@@ -187,11 +289,23 @@ def api_crawl_news():
         JSON：包含爬取数量和预览数据。
     """
     keyword = request.form.get("keyword", "").strip() or "金融"
-    table_name = request.form.get("table_name", "news_data")
+    table_name = request.form.get("table_name", "news_data").strip() or "news_data"
+    
+    if not keyword:
+        return jsonify({"status": "error", "msg": "关键字不能为空"}), 400
+    
+    logger.info(f"开始爬取新闻，关键字: {keyword}, 表名: {table_name}")
 
-    df_news = crawl_financial_news(keyword)  # 爬取新闻
-    if not df_news.empty:
-        save_to_mysql(df_news, table_name)   # 保存到 MySQL
+    try:
+        df_news = crawl_financial_news(keyword)  # 爬取新闻
+        if not df_news.empty:
+            save_to_mysql(df_news, table_name)   # 保存到 MySQL
+            logger.info(f"成功爬取 {len(df_news)} 条新闻并保存到 {table_name}")
+        else:
+            logger.warning(f"未爬取到任何新闻数据")
+    except Exception as e:
+        logger.error(f"爬取新闻失败: {e}")
+        return jsonify({"status": "error", "msg": f"爬取失败: {str(e)}"}), 500
 
     preview = df_news.head(10).to_dict(orient="records")
     return jsonify(
@@ -240,7 +354,478 @@ def api_crawl_price():
     )
 
 
+@app.route("/api/crawl_news_v2", methods=["POST"])
+def api_crawl_news_v2():
+    """
+    增强版新闻爬虫接口：允许指定关键字与表名，返回更多预览。
+    若外网失败，回落到内置示例。
+    """
+    keyword = request.form.get("keyword", "").strip() or "金融"
+    table_name = request.form.get("table_name", "news_data")
+
+    try:
+        df_news = crawl_financial_news(keyword)
+    except Exception:
+        df_news = pd.DataFrame()
+
+    if df_news.empty:
+        df_news = pd.DataFrame(
+            {
+                "keyword": [keyword] * 3,
+                "title": [
+                    f"{keyword} 政策对市场影响待评估",
+                    f"{keyword} 数据公布，波动加剧",
+                    f"机构解读：{keyword} 相关资产走势",
+                ],
+                "url": [
+                    "https://example.com/a",
+                    "https://example.com/b",
+                    "https://example.com/c",
+                ],
+            }
+        )
+
+    save_to_mysql(df_news, table_name)
+    preview = df_news.head(10).to_dict(orient="records")
+    return jsonify(
+        {
+            "status": "ok",
+            "keyword": keyword,
+            "table": table_name,
+            "rows": int(len(df_news)),
+            "preview": preview,
+        }
+    )
+
+
+@app.route("/api/wordcloud", methods=["POST"])
+def api_wordcloud():
+    """
+    生成词云数据，支持来源：上传 CSV、文本框、MySQL 表、示例新闻。
+    返回词频前 80 个。
+    """
+    texts, source = _build_texts_from_request()
+    counter = _tokenize_texts(texts)
+    top_words = counter.most_common(80)
+    return jsonify(
+        {
+            "status": "ok",
+            "source": source,
+            "words": [{"name": w, "value": int(c)} for w, c in top_words],
+        }
+    )
+
+
+@app.route("/api/sentiment_score", methods=["POST"])
+def api_sentiment_score():
+    """
+    对文本集合做情感评分，并附加简单热度/风险分。
+    """
+    texts, source = _build_texts_from_request()
+    combined = "\n".join(texts)[:2000]  # 防止过长
+    sentiment = analyze_sentiment(combined if combined else "中性")
+
+    # 热度分：按文本条数归一到 0~1
+    heat = min(1.0, len(texts) / 50.0)
+
+    # 简单风险分：负向概率加权
+    risk = round(sentiment.get("negative", 0.33) * 10, 2)
+
+    return jsonify(
+        {
+            "status": "ok",
+            "source": source,
+            "sentiment": sentiment,
+            "heat": heat,
+            "risk": risk,
+        }
+    )
+
+
+@app.route("/api/stock_predict", methods=["POST"])
+def api_stock_predict():
+    """
+    简单股票预测：若提供外部接口则优先使用，否则回退示例 trade.csv。
+    返回历史与未来预测序列。
+    """
+    api_url = request.form.get("api_url", "").strip()
+    horizon = int(request.form.get("horizon", 8) or 8)
+    horizon = max(3, min(horizon, 30))
+
+    df: pd.DataFrame
+    try:
+        if api_url:
+            resp = requests.get(api_url, timeout=10)
+            data = resp.json()
+            records = data.get("data", data.get("prices", data))
+            df = pd.DataFrame(records)
+        else:
+            df, _, _ = load_builtin_dataset("trade")
+    except Exception:
+        df, _, _ = load_builtin_dataset("trade")
+
+    # 选择 close/price 列
+    candidates = ["close", "Close", "price", "Price"]
+    y_col = next((c for c in candidates if c in df.columns), df.columns[-1])
+    df = df.dropna(subset=[y_col]).reset_index(drop=True)
+    y = df[y_col].astype(float).values
+    x = np.arange(len(y))
+
+    if len(y) < 5:
+        return jsonify({"status": "error", "msg": "数据量过少，无法预测"})
+
+    # 一阶线性拟合
+    coef = np.polyfit(x, y, deg=1)
+    poly = np.poly1d(coef)
+
+    future_x = np.arange(len(y), len(y) + horizon)
+    future_y = poly(future_x)
+
+    history = [{"x": int(i), "y": float(v)} for i, v in zip(x.tolist(), y.tolist())]
+    forecast = [{"x": int(i), "y": float(v)} for i, v in zip(future_x.tolist(), future_y.tolist())]
+
+    return jsonify(
+        {
+            "status": "ok",
+            "y_col": y_col,
+            "history": history,
+            "forecast": forecast,
+        }
+    )
+
+
+def _fetch_tushare_indices() -> Dict[str, Any]:
+    """
+    函数名称：_fetch_tushare_indices
+    函数功能：从 TuShare 获取若干常见指数的近 60 个交易日行情，生成多系列折线图所需数据。
+    返回值：
+        Dict：包含 series 列表、x 轴日期、最新报价表等。
+    """
+    try:
+        if ts is None:
+            raise RuntimeError("当前环境未安装 tushare 库，请先 pip install tushare")
+
+        if not TUSHARE_TOKEN:
+            raise RuntimeError("未配置 TuShare Token，请设置环境变量 TUSHARE_TOKEN")
+
+        pro = ts.pro_api(TUSHARE_TOKEN)
+
+        # 指数代码映射（TuShare index_daily 的 ts_code）
+        indices = {
+            "上证指数": "000001.SH",
+            "深证成指": "399001.SZ",
+            "创业板指": "399006.SZ",
+            "沪深300": "000300.SH",
+            "中证500": "000905.SH",
+        }
+
+        end_date = datetime.today()
+        start_date = end_date - timedelta(days=90)
+        end_str = end_date.strftime("%Y%m%d")
+        start_str = start_date.strftime("%Y%m%d")
+
+        series_list: List[Dict[str, Any]] = []
+        latest_rows: List[Dict[str, Any]] = []
+
+        ref_x: List[str] = []
+        missing: List[str] = []
+
+        for name, code in indices.items():
+            try:
+                df_idx = pro.index_daily(ts_code=code, start_date=start_str, end_date=end_str)
+            except Exception as e:
+                logger.warning(f"获取指数 {code} 失败: {e}")
+                df_idx = pd.DataFrame()
+
+            if df_idx.empty:
+                missing.append(name)
+                continue
+
+            # 按日期升序
+            df_idx = df_idx.sort_values("trade_date")
+            x = df_idx["trade_date"].tolist()
+            y = df_idx["close"].astype(float).round(3).tolist()
+
+            # 记录参考 x 轴
+            if len(x) > len(ref_x):
+                ref_x = x
+
+            series_list.append(
+                {
+                    "name": name,
+                    "type": "line",
+                    "smooth": True,
+                    "data": y,
+                }
+            )
+            last_row = df_idx.iloc[-1]
+            prev_row = df_idx.iloc[-2] if len(df_idx) > 1 else last_row
+            pct_chg = round((last_row["close"] - prev_row["close"]) / prev_row["close"] * 100, 2) if prev_row["close"] else 0
+            latest_rows.append(
+                {
+                    "name": name,
+                    "price": round(float(last_row["close"]), 3),
+                    "chg": pct_chg,
+                    "date": last_row["trade_date"],
+                }
+            )
+
+        # 如果部分指数拉取失败，用平滑占位数据填充，避免前端只显示等待
+        if missing and ref_x:
+            for m in missing:
+                # 构造一条平滑的占位线，以 ref_x 长度为准
+                base = float(latest_rows[0]["price"]) if latest_rows else 1000.0
+                noise = np.linspace(-5, 5, num=len(ref_x))
+                y_fake = (base + noise).round(3).tolist()
+                series_list.append(
+                    {
+                        "name": f"{m}(占位)",
+                        "type": "line",
+                        "smooth": True,
+                        "data": y_fake,
+                    }
+                )
+                latest_rows.append(
+                    {
+                        "name": f"{m}(占位)",
+                        "price": round(base, 3),
+                        "chg": 0.0,
+                        "date": ref_x[-1],
+                    }
+                )
+
+        # 如果完全没有从 TuShare 拿到任何指数，则退回到示例数据（避免 500）
+        if not series_list:
+            logger.warning("未从 TuShare 获取到任何指数数据，使用本地示例数据代替。")
+            # 使用 trade.csv 构造两条示例指数
+            df_trade, _, _ = load_builtin_dataset("trade")
+            df_trade = df_trade.head(60)  # 取前 60 条
+            ref_x = list(range(len(df_trade)))
+            close = df_trade["Close"].astype(float).tolist()
+            open_ = df_trade["Open"].astype(float).tolist()
+            series_list = [
+                {"name": "示例指数A", "type": "line", "smooth": True, "data": close},
+                {"name": "示例指数B", "type": "line", "smooth": True, "data": open_},
+            ]
+            latest_rows = [
+                {"name": "示例指数A", "price": round(float(close[-1]), 3), "chg": 0.0, "date": "示例"},
+                {"name": "示例指数B", "price": round(float(open_[-1]), 3), "chg": 0.0, "date": "示例"},
+            ]
+            missing = ["全部真实指数"]
+
+        return {
+            "x": ref_x or x,  # 优先使用参考 x 轴
+            "series": series_list,
+            "latest": latest_rows,
+            "missing": missing,
+        }
+
+    except Exception as e:
+        # 最后一层兜底：任何异常都不抛到外面，直接返回简单示例数据
+        logger.error(f"_fetch_tushare_indices 出现异常，使用最终兜底示例数据: {e}")
+        xs = list(range(30))
+        y1 = (1000 + np.linspace(-20, 20, 30)).round(2).tolist()
+        y2 = (800 + np.linspace(10, -10, 30)).round(2).tolist()
+        return {
+            "x": xs,
+            "series": [
+                {"name": "示例指数1", "type": "line", "smooth": True, "data": y1},
+                {"name": "示例指数2", "type": "line", "smooth": True, "data": y2},
+            ],
+            "latest": [
+                {"name": "示例指数1", "price": y1[-1], "chg": 0.0, "date": "示例"},
+                {"name": "示例指数2", "price": y2[-1], "chg": 0.0, "date": "示例"},
+            ],
+            "missing": ["TuShare 指数异常，已使用示例数据"],
+        }
+
+
+@app.route("/api/ts_market", methods=["GET"])
+@handle_api_errors
+def api_ts_market():
+    """
+    函数名称：api_ts_market
+    函数功能：拉取 TuShare 指数行情，返回折线图和最新报价数据。
+    返回值：
+        JSON：包含 x 轴日期、series 数组（多指数折线）、latest 表格数据。
+    """
+    logger.info("开始拉取 TuShare 指数行情")
+    data = _fetch_tushare_indices()
+    return jsonify({"status": "ok", **data})
+
+
+def _build_mock_fx() -> Dict[str, Any]:
+    """
+    函数名称：_build_mock_fx
+    函数功能：在外汇数据无法从 TuShare 获取时，构造一组示例货币数据。
+    返回值：
+        Dict：包含 currencies 列表。
+    """
+    today = datetime.today().strftime("%Y-%m-%d")
+    return {
+        "currencies": [
+            {"name": "英镑", "symbol": "GBP/USD", "price": 1.1825, "chg": -0.0005, "pct": 0.0, "date": today},
+            {"name": "日元", "symbol": "JPY/USD", "price": 136.1876, "chg": -0.0715, "pct": -0.7, "date": today},
+            {"name": "欧元", "symbol": "EUR/USD", "price": 0.9982, "chg": -0.0016, "pct": -0.2, "date": today},
+            {"name": "比特币", "symbol": "BTC/USD", "price": 21318.87, "chg": -132.18, "pct": -0.6, "date": today},
+        ]
+    }
+
+
+def _fetch_tushare_fx() -> Dict[str, Any]:
+    """
+    函数名称：_fetch_tushare_fx
+    函数功能：通过 TuShare 获取部分主要货币的行情数据。
+    说明：
+        TuShare 外汇接口 fx_daily 以 ts_code 标识货币对，如 USDCNY.FX。
+        这里选取几种常见货币对，并计算涨跌额和涨跌幅。
+        若获取失败，将在上层回退到 _build_mock_fx。
+    返回值：
+        Dict：包含 currencies 列表。
+    """
+    if ts is None:
+        raise RuntimeError("当前环境未安装 tushare 库")
+    if not TUSHARE_TOKEN:
+        raise RuntimeError("未配置 TuShare Token")
+
+    pro = ts.pro_api(TUSHARE_TOKEN)
+
+    # TuShare 外汇代码示例：USDCNY.FX、USDJPY.FX 等（具体以 TuShare 文档为准）
+    symbols = {
+        "英镑": ("GBPUSD.FX", "GBP/USD"),
+        "日元": ("USDJPY.FX", "USD/JPY"),
+        "欧元": ("EURUSD.FX", "EUR/USD"),
+    }
+
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=5)
+    end_str = end_date.strftime("%Y%m%d")
+    start_str = start_date.strftime("%Y%m%d")
+
+    rows: List[Dict[str, Any]] = []
+
+    for name, (ts_code, display) in symbols.items():
+        try:
+            df_fx = pro.fx_daily(ts_code=ts_code, start_date=start_str, end_date=end_str)
+        except Exception as e:
+            logger.warning(f"获取外汇 {ts_code} 失败: {e}")
+            continue
+
+        if df_fx.empty:
+            logger.warning(f"外汇 {ts_code} 在区间 {start_str}-{end_str} 无数据")
+            continue
+
+        df_fx = df_fx.sort_values("trade_date")
+        last = df_fx.iloc[-1]
+        prev = df_fx.iloc[-2] if len(df_fx) > 1 else last
+        price = float(last.get("close", last.get("rate", 0.0)))
+        prev_price = float(prev.get("close", prev.get("rate", price)))
+        chg = round(price - prev_price, 6)
+        pct = round((price / prev_price - 1.0) * 100, 2) if prev_price else 0.0
+        rows.append(
+            {
+                "name": name,
+                "symbol": display,
+                "price": round(price, 6),
+                "chg": chg,
+                "pct": pct,
+                "date": last.get("trade_date", ""),
+            }
+        )
+
+    if not rows:
+        raise RuntimeError("未从 TuShare 获取到外汇数据")
+
+    # 加入比特币占位数据，TuShare 加密货币接口在此略去，可按需扩展
+    rows.append(
+        {
+            "name": "比特币",
+            "symbol": "BTC/USD",
+            "price": 21318.87,
+            "chg": -132.18,
+            "pct": -0.6,
+            "date": datetime.today().strftime("%Y-%m-%d"),
+        }
+    )
+
+    return {"currencies": rows}
+
+
+@app.route("/api/ts_fx", methods=["GET"])
+@handle_api_errors
+def api_ts_fx():
+    """
+    函数名称：api_ts_fx
+    函数功能：返回若干主要货币/比特币相对美元的价格与涨跌幅。
+    说明：优先通过 TuShare 获取实时外汇数据，失败时回退到示例数据。
+    返回值：
+        JSON：包含 currencies 列表。
+    """
+    try:
+        data = _fetch_tushare_fx()
+    except Exception as e:
+        logger.warning(f"TuShare 外汇获取失败，使用示例数据: {e}")
+        data = _build_mock_fx()
+    return jsonify({"status": "ok", **data})
+
+
+@app.route("/api/ts_stock_range", methods=["POST"])
+@handle_api_errors
+def api_ts_stock_range():
+    """
+    函数名称：api_ts_stock_range
+    函数功能：查询单只股票在指定日期区间内的收盘价和累计涨幅。
+    前端传入：
+        ts_code：股票代码（TuShare ts_code，如 600519.SH）；
+        start_date：开始日期（YYYYMMDD）；
+        end_date：结束日期（YYYYMMDD）。
+    返回值：
+        JSON：包含 dates、closes、cum_change（累计涨幅百分比）。
+    """
+    if ts is None:
+        return jsonify({"status": "error", "msg": "当前环境未安装 tushare 库"}), 500
+
+    if not TUSHARE_TOKEN:
+        return jsonify({"status": "error", "msg": "未配置 TuShare Token"}), 500
+
+    ts_code = request.form.get("ts_code", "").strip()
+    start_date = request.form.get("start_date", "").strip()
+    end_date = request.form.get("end_date", "").strip()
+
+    if not ts_code or not start_date or not end_date:
+        return jsonify({"status": "error", "msg": "股票代码与起止日期均不能为空"}), 400
+
+    pro = ts.pro_api(TUSHARE_TOKEN)
+    try:
+        df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+    except Exception as e:
+        logger.error(f"拉取股票 {ts_code} 区间数据失败: {e}")
+        return jsonify({"status": "error", "msg": f"拉取股票数据失败: {str(e)}"}), 500
+
+    if df.empty:
+        return jsonify({"status": "error", "msg": "指定区间内无交易数据"}), 400
+
+    # 按日期升序
+    df = df.sort_values("trade_date")
+    dates = df["trade_date"].tolist()
+    closes = df["close"].astype(float).round(3).tolist()
+
+    base = closes[0]
+    cum_change = [round((c / base - 1.0) * 100, 2) for c in closes]
+
+    return jsonify(
+        {
+            "status": "ok",
+            "ts_code": ts_code,
+            "dates": dates,
+            "closes": closes,
+            "cum_change": cum_change,
+        }
+    )
+
+
 @app.route("/api/run_ml", methods=["POST"])
+@handle_api_errors
 def api_run_ml():
     """
     函数名称：api_run_ml
@@ -252,40 +837,70 @@ def api_run_ml():
     返回值：
         JSON：包含三种模型的指标和预测预览。
     """
-    table_name = request.form.get("table_name", "financial_series")
+    table_name = request.form.get("table_name", "financial_series").strip() or "financial_series"
     feature_cols_str = request.form.get("feature_cols", "").strip()
     target_col = request.form.get("target_col", "").strip()
 
     if not feature_cols_str:
-        return jsonify({"status": "error", "msg": "feature_cols 不能为空"})
+        return jsonify({"status": "error", "msg": "feature_cols 不能为空"}), 400
 
     feature_cols = [c.strip() for c in feature_cols_str.split(",") if c.strip()]
+    if not feature_cols:
+        return jsonify({"status": "error", "msg": "特征列名无效"}), 400
 
-    df = load_from_mysql(table_name)  # 从 MySQL 读取数据
+    logger.info(f"开始运行机器学习模型，表: {table_name}, 特征: {feature_cols}, 目标: {target_col}")
+
+    try:
+        df = load_from_mysql(table_name)  # 从 MySQL 读取数据
+    except Exception as e:
+        logger.error(f"从 MySQL 读取数据失败: {e}")
+        return jsonify({"status": "error", "msg": f"读取数据库失败: {str(e)}"}), 500
+
+    # 验证数据
+    validation = validate_dataframe(df, min_rows=10, required_cols=feature_cols)
+    if not validation["valid"]:
+        return jsonify({"status": "error", "msg": validation["msg"]}), 400
 
     results: Dict[str, Dict] = {}
 
     # 1. 回归
     if target_col and target_col in df.columns:
-        reg_res: MLResult = run_regression(df, feature_cols, target_col)
-        results["regression"] = {
-            "metrics": reg_res.metrics,
-            "preview": reg_res.preview.to_dict(orient="records"),
-        }
+        try:
+            reg_res: MLResult = run_regression(df, feature_cols, target_col)
+            results["regression"] = {
+                "metrics": reg_res.metrics,
+                "preview": reg_res.preview.to_dict(orient="records"),
+            }
+            logger.info(f"回归模型完成，R²: {reg_res.metrics.get('r2', 'N/A')}")
+        except Exception as e:
+            logger.error(f"回归模型失败: {e}")
+            results["regression"] = {"error": str(e)}
 
         # 2. 分类（基于同一个连续目标）
-        cls_res: MLResult = run_classification(df, feature_cols, target_col)
-        results["classification"] = {
-            "metrics": cls_res.metrics,
-            "preview": cls_res.preview.to_dict(orient="records"),
-        }
+        try:
+            cls_res: MLResult = run_classification(df, feature_cols, target_col)
+            results["classification"] = {
+                "metrics": cls_res.metrics,
+                "preview": cls_res.preview.to_dict(orient="records"),
+            }
+            logger.info(f"分类模型完成，准确率: {cls_res.metrics.get('accuracy', 'N/A')}")
+        except Exception as e:
+            logger.error(f"分类模型失败: {e}")
+            results["classification"] = {"error": str(e)}
+    else:
+        logger.warning(f"目标列 {target_col} 不存在，跳过回归和分类")
 
     # 3. 聚类（只用特征列）
-    clu_res: MLResult = run_clustering(df, feature_cols)
-    results["clustering"] = {
-        "metrics": clu_res.metrics,
-        "preview": clu_res.preview.to_dict(orient="records"),
-    }
+    try:
+        clu_res: MLResult = run_clustering(df, feature_cols)
+        results["clustering"] = {
+            "metrics": clu_res.metrics,
+            "preview": clu_res.preview.to_dict(orient="records"),
+        }
+        logger.info(f"聚类模型完成，簇数: {clu_res.metrics.get('n_clusters', 'N/A')}")
+    except Exception as e:
+        logger.error(f"聚类模型失败: {e}")
+        results["clustering"] = {"error": str(e)}
 
     return jsonify(
         {

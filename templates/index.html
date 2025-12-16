@@ -9,6 +9,7 @@
       href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
     />
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2.1.0/dist/echarts-wordcloud.min.js"></script>
     <style>
       body {
         background-color: #f5f7fa;
@@ -59,11 +60,18 @@
       .sentiment-neg {
         background: #f44336;
       }
+      /* 分页内容容器：默认隐藏，激活时显示 */
+      .section-block {
+        display: none;
+      }
+      .section-block.active {
+        display: block;
+      }
     </style>
   </head>
 
   <body>
-    <div class="container py-3">
+    <div class="container-fluid py-3">
       <div class="mb-3 text-center">
         <h2 class="page-title">金融数据与文献综合分析系统</h2>
         <p class="text-muted small mb-1">
@@ -75,6 +83,210 @@
         </p>
       </div>
 
+      <!-- 布局：左侧侧边栏 + 右侧分页内容 -->
+      <div class="row">
+        <div class="col-md-2 col-lg-2 mb-3">
+          <div class="list-group shadow-sm" id="sideNav">
+            <a class="list-group-item list-group-item-action" data-target="section-crawler" href="#">爬虫取数</a>
+            <a class="list-group-item list-group-item-action" data-target="section-wordcloud" href="#">词云</a>
+            <a class="list-group-item list-group-item-action" data-target="section-sentiment" href="#">评分系统</a>
+            <a class="list-group-item list-group-item-action" data-target="section-predict" href="#">股票预测</a>
+            <a class="list-group-item list-group-item-action" data-target="section-analysis" href="#">数据分析</a>
+          </div>
+        </div>
+
+        <!-- 右侧主体内容（分页切换） -->
+        <div class="col-md-10 col-lg-10">
+
+        <!-- 爬虫与数据获取 -->
+        <div class="card shadow-sm mb-3 section-block" id="section-crawler">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div class="section-title mb-0">一、爬虫获取金融新闻并入库</div>
+              <small class="text-muted">外网可用时将尝试实时抓取，失败自动回退示例数据</small>
+            </div>
+            <div class="row g-2 align-items-end">
+              <div class="col-md-4">
+                <label class="form-label">新闻关键字</label>
+                <input id="crawlKeyword" class="form-control" placeholder="例如：利率 / 中概股" />
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">保存到 MySQL 表名</label>
+                <input id="crawlTable" class="form-control" value="news_data" />
+              </div>
+              <div class="col-md-4">
+                <button class="btn btn-success w-100" id="crawlBtn">抓取并保存</button>
+              </div>
+            </div>
+            <pre class="bg-dark text-light p-2 small mt-2" style="max-height:180px;overflow:auto" id="crawlPreview"></pre>
+          </div>
+        </div>
+
+        <!-- 词云 -->
+        <div class="card shadow-sm mb-3 section-block" id="section-wordcloud">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div class="section-title mb-0">二、词云可视化</div>
+              <small class="text-muted">数据源：爬虫表 / 上传 CSV / 文本框</small>
+            </div>
+            <div class="row g-2">
+              <div class="col-md-3">
+                <label class="form-label">MySQL 表名（可选）</label>
+                <input id="wcTable" class="form-control" placeholder="如：news_data" />
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">上传 CSV（第一列为文本）</label>
+                <input id="wcFile" type="file" accept=".csv" class="form-control" />
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">或直接粘贴文本</label>
+                <textarea id="wcText" rows="2" class="form-control" placeholder="多段文本可换行"></textarea>
+              </div>
+            </div>
+            <div class="mt-2 d-flex align-items-center gap-2">
+              <button class="btn btn-primary" id="wcBtn">生成词云</button>
+              <small class="text-muted" id="wcSource"></small>
+            </div>
+            <div id="wordCloud" style="height:300px" class="mt-2"></div>
+          </div>
+        </div>
+
+        <!-- 评分系统 -->
+        <div class="card shadow-sm mb-3 section-block" id="section-sentiment">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div class="section-title mb-0">三、情感/热度/风险评分</div>
+              <small class="text-muted">复用爬虫数据或自定义文本</small>
+            </div>
+            <div class="row g-2">
+              <div class="col-md-3">
+                <label class="form-label">MySQL 表名（可选）</label>
+                <input id="sentTable" class="form-control" placeholder="如：news_data" />
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">上传 CSV</label>
+                <input id="sentFile" type="file" accept=".csv" class="form-control" />
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">粘贴文本</label>
+                <textarea id="sentText" rows="2" class="form-control" placeholder="情绪文本，可多行"></textarea>
+              </div>
+            </div>
+            <div class="mt-2">
+              <button class="btn btn-warning" id="sentBtn">计算评分</button>
+              <span class="text-muted small ms-2" id="sentSource"></span>
+            </div>
+            <div class="mt-2 small">
+              <div>情感：<span id="sentPosText2" class="text-success">-</span> / <span id="sentNeuText2" class="text-secondary">-</span> / <span id="sentNegText2" class="text-danger">-</span></div>
+              <div>热度：<span id="sentHeat">-</span>，风险评分：<span id="sentRisk">-</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 股票预测 / TuShare 多指数 -->
+        <div class="card shadow-sm mb-3 section-block" id="section-predict">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div class="section-title mb-0">四、TuShare 多指数行情与预测</div>
+              <small class="text-muted">拉取上证/深成/创业/沪深300/中证500 等指数，自动绘制多折线</small>
+            </div>
+
+            <div class="row g-2 align-items-end mb-2">
+              <div class="col-md-4">
+                <button class="btn btn-success w-100" id="tsBtn">拉取 TuShare 指数行情</button>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">可选：自定义价格接口（返回 data 数组）</label>
+                <input id="predApi" class="form-control" placeholder="http(s)://..." />
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">预测步数</label>
+                <input id="predHorizon" type="number" min="3" max="30" value="8" class="form-control" />
+              </div>
+              <div class="col-md-2">
+                <button class="btn btn-info w-100" id="predBtn">生成预测</button>
+              </div>
+            </div>
+
+            <div class="card mb-2">
+              <div class="card-body p-2">
+                <div class="section-title mb-2" style="font-size: 0.95rem;">多指数走势</div>
+                <div id="predictChart" style="height:320px"></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-body p-2">
+                <div class="section-title mb-2" style="font-size: 0.95rem;">最新报价</div>
+                <div class="table-responsive">
+                  <table class="table table-sm table-striped mb-0" id="tsTable">
+                    <thead>
+                      <tr>
+                        <th>指数</th>
+                        <th>最新价</th>
+                        <th>涨跌幅</th>
+                        <th>日期</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- 货币板块 -->
+            <div class="card mt-3">
+              <div class="card-body p-2">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="section-title mb-0" style="font-size: 0.95rem;">货币（相对美元）</div>
+                  <button class="btn btn-outline-secondary btn-sm" id="fxBtn">刷新货币报价</button>
+                </div>
+                <div class="table-responsive">
+                  <table class="table table-sm table-striped mb-0" id="fxTable">
+                    <thead>
+                      <tr>
+                        <th>货币</th>
+                        <th>符号</th>
+                        <th>价格</th>
+                        <th>涨跌额</th>
+                        <th>涨跌幅</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- 单只股票区间涨幅 -->
+            <div class="card mt-3">
+              <div class="card-body p-2">
+                <div class="section-title mb-2" style="font-size: 0.95rem;">单只股票区间涨幅分析</div>
+                <div class="row g-2 align-items-end">
+                  <div class="col-md-3">
+                    <label class="form-label">股票代码（ts_code）</label>
+                    <input id="stockCode" class="form-control" placeholder="如：600519.SH" />
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">开始日期</label>
+                    <input id="stockStart" class="form-control" placeholder="如：20250101" />
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">结束日期</label>
+                    <input id="stockEnd" class="form-control" placeholder="如：20251231" />
+                  </div>
+                  <div class="col-md-3">
+                    <button class="btn btn-primary w-100" id="stockBtn">查询涨幅</button>
+                  </div>
+                </div>
+                <div id="stockChart" style="height:260px" class="mt-2"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      <!-- 数据分析分页容器 -->
+      <div class="section-block" id="section-analysis">
       <!-- 输入区域：数据与文本 -->
       <div class="row g-3 mb-3">
         <div class="col-md-6">
@@ -260,18 +472,63 @@
         </div>
       </div>
 
+        </div> <!-- /section-analysis -->
+        </div> <!-- /右侧主体 -->
+      </div> <!-- /row -->
+
       <footer class="text-center text-muted small py-2">
         课程实验示例 &copy; 金融数据分析与 AI 应用
       </footer>
     </div>
 
     <script>
-      // 初始化五个 ECharts 图表实例
+      // 初始化图表实例
       const chartLine = echarts.init(document.getElementById("chartLine"));
       const chartBar = echarts.init(document.getElementById("chartBar"));
       const chartPie = echarts.init(document.getElementById("chartPie"));
       const chartScatter = echarts.init(document.getElementById("chartScatter"));
       const chartBox = echarts.init(document.getElementById("chartBox"));
+      const wordChart = echarts.init(document.getElementById("wordCloud"));
+      const predictChart = echarts.init(
+        document.getElementById("predictChart")
+      );
+
+      // 侧边栏分页切换
+      const sectionBlocks = document.querySelectorAll(".section-block");
+      const sideLinks = document.querySelectorAll("#sideNav a[data-target]");
+      let predictLoaded = false;
+
+      function showSection(id) {
+        sectionBlocks.forEach((sec) => {
+          sec.classList.toggle("active", sec.id === id);
+        });
+        sideLinks.forEach((link) => {
+          link.classList.toggle("active", link.dataset.target === id);
+        });
+
+        // 首次切换到“股票预测”分页时自动获取指数与货币数据
+        if (id === "section-predict" && !predictLoaded) {
+          if (typeof loadTsMarket === "function") {
+            loadTsMarket();
+          }
+          if (typeof loadFx === "function") {
+            loadFx();
+          }
+          predictLoaded = true;
+        }
+      }
+
+      sideLinks.forEach((link) => {
+        link.addEventListener("click", function (e) {
+          e.preventDefault();
+          showSection(this.dataset.target);
+        });
+      });
+
+      // 默认显示第一个分页
+      if (sideLinks.length > 0) {
+        showSection(sideLinks[0].dataset.target);
+      }
 
       // 设置空白初始配置
       chartLine.setOption({ title: { text: "等待数据...", left: "center" } });
@@ -279,6 +536,8 @@
       chartPie.setOption({ title: { text: "等待数据...", left: "center" } });
       chartScatter.setOption({ title: { text: "等待数据...", left: "center" } });
       chartBox.setOption({ title: { text: "等待数据...", left: "center" } });
+      wordChart.setOption({ title: { text: "等待数据...", left: "center" } });
+      predictChart.setOption({ title: { text: "等待数据...", left: "center" } });
 
       /**
        * 辅助函数：更新情感条与文本
@@ -383,8 +642,407 @@
       }
 
       /**
+       * 词云渲染
+       */
+      function renderWordCloud(words) {
+        wordChart.setOption({
+          tooltip: {},
+          series: [
+            {
+              type: "wordCloud",
+              shape: "circle",
+              sizeRange: [12, 42],
+              rotationRange: [-45, 45],
+              gridSize: 6,
+              textStyle: {
+                color: () =>
+                  "rgb(" +
+                  [
+                    Math.round(Math.random() * 160),
+                    Math.round(Math.random() * 160),
+                    Math.round(Math.random() * 160),
+                  ].join(",") +
+                  ")",
+              },
+              data: words,
+            },
+          ],
+        });
+      }
+
+      /**
+       * 股票预测渲染
+       */
+      function renderPredict(history, forecast, yCol) {
+        const histData = history.map((d) => [d.x, d.y]);
+        const futData = forecast.map((d) => [d.x, d.y]);
+        predictChart.setOption({
+          tooltip: { trigger: "axis" },
+          xAxis: { type: "value" },
+          yAxis: { type: "value", name: yCol || "price" },
+          series: [
+            {
+              name: "历史",
+              type: "line",
+              data: histData,
+              smooth: true,
+              symbol: "circle",
+            },
+            {
+              name: "预测",
+              type: "line",
+              data: futData,
+              smooth: true,
+              lineStyle: { type: "dashed" },
+              symbol: "triangle",
+            },
+          ],
+        });
+      }
+
+      /**
+       * TuShare 指数行情渲染
+       */
+      function renderTsMarket(data) {
+        const x = (data.x || []).map((d) => d);
+        const series = data.series || [];
+        predictChart.setOption({
+          tooltip: { trigger: "axis" },
+          legend: {
+            top: 10,
+            type: "scroll", // 当图例较多时可横向滚动
+            orient: "horizontal",
+            itemGap: 18,
+            textStyle: {
+              fontSize: 12,
+            },
+          },
+          xAxis: {
+            type: "category",
+            data: x,
+          },
+          yAxis: { type: "value", name: "指数点位" },
+          series,
+        });
+
+        // 填充表格
+        const tbody = document.querySelector("#tsTable tbody");
+        tbody.innerHTML = "";
+        (data.latest || []).forEach((row) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${row.name}</td>
+            <td>${row.price}</td>
+            <td class="${row.chg >= 0 ? "text-success" : "text-danger"}">${row.chg}%</td>
+            <td>${row.date}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+
+        // 如果存在缺失的指数，给出提示
+        if (data.missing && data.missing.length > 0) {
+          const msg = "以下指数未能从 TuShare 拉取，使用占位数据：" + data.missing.join("、");
+          predictChart.setOption({
+            title: { text: msg, left: "center", textStyle: { fontSize: 12 } },
+          });
+        } else {
+          predictChart.setOption({ title: { text: "" } });
+        }
+      }
+
+      /**
+       * 货币表渲染
+       */
+      function renderFxTable(data) {
+        const tbody = document.querySelector("#fxTable tbody");
+        tbody.innerHTML = "";
+        (data.currencies || []).forEach((row) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${row.name}</td>
+            <td>${row.symbol}</td>
+            <td>${row.price}</td>
+            <td class="${row.chg >= 0 ? "text-success" : "text-danger"}">${row.chg}</td>
+            <td class="${row.pct >= 0 ? "text-success" : "text-danger"}">${row.pct}%</td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }
+
+      /**
+       * 单股区间涨幅图渲染
+       */
+      function renderStockRange(dates, cumChange, code) {
+        const dom = document.getElementById("stockChart");
+        const stockChart = echarts.init(dom);
+        stockChart.setOption({
+          tooltip: { trigger: "axis" },
+          xAxis: { type: "category", data: dates },
+          yAxis: { type: "value", name: "累计涨幅(%)" },
+          series: [
+            {
+              name: code,
+              type: "line",
+              smooth: true,
+              areaStyle: {},
+              data: cumChange,
+            },
+          ],
+        });
+      }
+
+      /**
        * 点击“开始分析”按钮时，将表单数据打包并通过 fetch 提交给后端
        */
+
+      // 爬虫按钮
+      document.getElementById("crawlBtn").addEventListener("click", function () {
+        const fd = new FormData();
+        fd.append("keyword", document.getElementById("crawlKeyword").value);
+        fd.append("table_name", document.getElementById("crawlTable").value);
+        fetch("/api/crawl_news_v2", { method: "POST", body: fd })
+          .then((r) => r.json())
+          .then((d) => {
+            document.getElementById("crawlPreview").textContent = JSON.stringify(
+              d,
+              null,
+              2
+            );
+          })
+          .catch((e) => {
+            document.getElementById("crawlPreview").textContent =
+              "请求失败：" + e;
+          });
+      });
+
+      // 词云
+      document.getElementById("wcBtn").addEventListener("click", function () {
+        const fd = new FormData();
+        const file = document.getElementById("wcFile").files[0];
+        if (file) fd.append("file", file);
+        fd.append("text_data", document.getElementById("wcText").value);
+        fd.append("table_name", document.getElementById("wcTable").value);
+        fetch("/api/wordcloud", { method: "POST", body: fd })
+          .then((r) => r.json())
+          .then((d) => {
+            document.getElementById("wcSource").innerText =
+              "数据源：" + (d.source || "未知");
+            renderWordCloud(d.words || []);
+          })
+          .catch((e) => {
+            document.getElementById("wcSource").innerText = "请求失败：" + e;
+          });
+      });
+
+      // 评分系统
+      document.getElementById("sentBtn").addEventListener("click", function () {
+        const fd = new FormData();
+        const file = document.getElementById("sentFile").files[0];
+        if (file) fd.append("file", file);
+        fd.append("text_data", document.getElementById("sentText").value);
+        fd.append("table_name", document.getElementById("sentTable").value);
+        fetch("/api/sentiment_score", { method: "POST", body: fd })
+          .then((r) => r.json())
+          .then((d) => {
+            document.getElementById("sentSource").innerText =
+              "数据源：" + (d.source || "未知");
+            const s = d.sentiment || {};
+            const p = Math.round((s.positive || 0) * 100);
+            const n = Math.round((s.neutral || 0) * 100);
+            const g = Math.round((s.negative || 0) * 100);
+            document.getElementById("sentPosText2").innerText = `正向 ${p}%`;
+            document.getElementById("sentNeuText2").innerText = `中性 ${n}%`;
+            document.getElementById("sentNegText2").innerText = `负向 ${g}%`;
+            document.getElementById("sentHeat").innerText = `热度 ${(d.heat || 0).toFixed(2)}`;
+            document.getElementById("sentRisk").innerText = d.risk ?? "-";
+            // 同时更新顶部情感条便于复用
+            updateSentimentBar(s);
+          })
+          .catch((e) => {
+            document.getElementById("sentSource").innerText = "请求失败：" + e;
+          });
+      });
+
+      // 股票预测
+      document.getElementById("predBtn").addEventListener("click", function () {
+        const btn = this;
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "预测中...";
+        const fd = new FormData();
+        fd.append("api_url", document.getElementById("predApi").value);
+        fd.append("horizon", document.getElementById("predHorizon").value);
+        fetch("/api/stock_predict", { method: "POST", body: fd })
+          .then((r) => r.json())
+          .then((d) => {
+            if (d.status === "ok") {
+              renderPredict(d.history || [], d.forecast || [], d.y_col);
+            } else {
+              predictChart.setOption({
+                title: { text: d.msg || "预测失败", left: "center" },
+              });
+            }
+          })
+          .catch((e) => {
+            predictChart.setOption({
+              title: { text: "请求失败：" + e, left: "center" },
+            });
+          })
+          .finally(() => {
+            btn.disabled = false;
+            btn.textContent = original;
+          });
+      });
+
+      // TuShare 多指数行情
+      function loadTsMarket() {
+        const btn = document.getElementById("tsBtn");
+        const original = btn ? btn.textContent : "";
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "拉取中...";
+        }
+        fetch("/api/ts_market")
+          .then((r) => {
+            if (!r.ok) {
+              return r.json().then((d) => {
+                throw new Error(d.msg || `HTTP ${r.status}`);
+              });
+            }
+            return r.json();
+          })
+          .then((d) => {
+            if (d.status === "error") {
+              throw new Error(d.msg || "拉取失败");
+            }
+            renderTsMarket(d);
+          })
+          .catch((e) => {
+            predictChart.setOption({
+              title: { text: "TuShare 拉取失败：" + e.message, left: "center" },
+            });
+            alert("TuShare 拉取失败：" + e.message);
+          })
+          .finally(() => {
+            if (btn) {
+              btn.disabled = false;
+              btn.textContent = original;
+            }
+          });
+      }
+
+      document.getElementById("tsBtn").addEventListener("click", loadTsMarket);
+
+      // 货币报价
+      function loadFx() {
+        const btn = document.getElementById("fxBtn");
+        const original = btn ? btn.textContent : "";
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "刷新中...";
+        }
+        fetch("/api/ts_fx")
+          .then((r) => {
+            if (!r.ok) {
+              return r.json().then((d) => {
+                throw new Error(d.msg || `HTTP ${r.status}`);
+              });
+            }
+            return r.json();
+          })
+          .then((d) => {
+            if (d.status === "error") {
+              throw new Error(d.msg || "拉取失败");
+            }
+            renderFxTable(d);
+          })
+          .catch((e) => {
+            alert("货币数据拉取失败：" + e.message);
+          })
+          .finally(() => {
+            if (btn) {
+              btn.disabled = false;
+              btn.textContent = original;
+            }
+          });
+      }
+
+      document.getElementById("fxBtn").addEventListener("click", loadFx);
+
+      // 单股区间涨幅
+      document.getElementById("stockBtn").addEventListener("click", function () {
+        const code = document.getElementById("stockCode").value.trim();
+        const start = document.getElementById("stockStart").value.trim();
+        const end = document.getElementById("stockEnd").value.trim();
+        if (!code || !start || !end) {
+          alert("请完整填写股票代码和起止日期");
+          return;
+        }
+        const btn = this;
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "查询中...";
+        const fd = new FormData();
+        fd.append("ts_code", code);
+        fd.append("start_date", start);
+        fd.append("end_date", end);
+        fetch("/api/ts_stock_range", { method: "POST", body: fd })
+          .then((r) => {
+            if (!r.ok) {
+              return r.json().then((d) => {
+                throw new Error(d.msg || `HTTP ${r.status}`);
+              });
+            }
+            return r.json();
+          })
+          .then((d) => {
+            if (d.status === "error") {
+              throw new Error(d.msg || "查询失败");
+            }
+            renderStockRange(d.dates || [], d.cum_change || [], d.ts_code);
+          })
+          .catch((e) => {
+            alert("区间涨幅查询失败：" + e.message);
+          })
+          .finally(() => {
+            btn.disabled = false;
+            btn.textContent = original;
+          });
+      });
+
+      // TuShare 多指数行情
+      document.getElementById("tsBtn").addEventListener("click", function () {
+        const btn = this;
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "拉取中...";
+        fetch("/api/ts_market")
+          .then((r) => {
+            if (!r.ok) {
+              return r.json().then((d) => {
+                throw new Error(d.msg || `HTTP ${r.status}`);
+              });
+            }
+            return r.json();
+          })
+          .then((d) => {
+            if (d.status === "error") {
+              throw new Error(d.msg || "拉取失败");
+            }
+            renderTsMarket(d);
+          })
+          .catch((e) => {
+            predictChart.setOption({
+              title: { text: "TuShare 拉取失败：" + e.message, left: "center" },
+            });
+            alert("TuShare 拉取失败：" + e.message);
+          })
+          .finally(() => {
+            btn.disabled = false;
+            btn.textContent = original;
+          });
+      });
+
       document
         .getElementById("analyzeBtn")
         .addEventListener("click", function () {
@@ -415,9 +1073,21 @@
             method: "POST",
             body: formData,
           })
-            .then((res) => res.json())
+            .then((res) => {
+              if (!res.ok) {
+                return res.json().then(data => {
+                  throw new Error(data.msg || `HTTP ${res.status}`);
+                });
+              }
+              return res.json();
+            })
             .then((data) => {
-              document.getElementById("statusText").innerText = "分析完成";
+              if (data.status === "error") {
+                throw new Error(data.msg || "分析失败");
+              }
+              
+              document.getElementById("statusText").innerText = "分析完成 ✓";
+              document.getElementById("statusText").className = "small text-success";
 
               // 更新数值摘要
               document.getElementById("xyLabel").innerText =
@@ -461,7 +1131,11 @@
             .catch((err) => {
               console.error(err);
               document.getElementById("statusText").innerText =
-                "分析失败，请查看控制台。";
+                "分析失败：" + err.message;
+              document.getElementById("statusText").className = "small text-danger";
+              
+              // 显示错误提示
+              alert("分析失败：" + err.message + "\n请检查数据格式或网络连接。");
             });
         });
 
@@ -472,6 +1146,8 @@
         chartPie.resize();
         chartScatter.resize();
         chartBox.resize();
+        wordChart.resize();
+        predictChart.resize();
       });
     </script>
   </body>

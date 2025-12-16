@@ -26,20 +26,37 @@ from sklearn.preprocessing import StandardScaler
 from db_config import DB_CONFIG
 
 
+# 全局 Engine 实例，实现连接池复用
+_engine_cache: Engine | None = None
+
+
 def build_engine() -> Engine:
     """
     函数名称：build_engine
-    函数功能：根据配置创建 SQLAlchemy 的 MySQL Engine 对象。
+    函数功能：根据配置创建 SQLAlchemy 的 MySQL Engine 对象（使用单例模式，复用连接池）。
     返回值：
         Engine：数据库连接引擎。
     """
+    global _engine_cache
+    
+    if _engine_cache is not None:
+        return _engine_cache
+    
     url = (
         f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
         f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}"
         f"?charset={DB_CONFIG['charset']}"
     )
-    engine = create_engine(url, echo=False, future=True)  # 创建 Engine
-    return engine
+    # 使用连接池，提高性能
+    _engine_cache = create_engine(
+        url,
+        echo=False,
+        pool_size=5,           # 连接池大小
+        max_overflow=10,       # 最大溢出连接数
+        pool_pre_ping=True,    # 连接前检查连接是否有效
+        pool_recycle=3600,     # 连接回收时间（秒）
+    )
+    return _engine_cache
 
 
 def crawl_financial_news(keyword: str) -> pd.DataFrame:
@@ -119,8 +136,17 @@ def save_to_mysql(df: pd.DataFrame, table_name: str, if_exists: str = "append") 
     返回值：
         None。
     """
+    if df.empty:
+        raise ValueError("DataFrame 为空，无法保存到数据库")
+    
+    if not table_name or not isinstance(table_name, str):
+        raise ValueError("表名无效")
+    
     engine = build_engine()
-    df.to_sql(table_name, engine, if_exists=if_exists, index=False)
+    try:
+        df.to_sql(table_name, engine, if_exists=if_exists, index=False)
+    except Exception as e:
+        raise RuntimeError(f"保存到 MySQL 失败: {str(e)}")
 
 
 def load_from_mysql(table_name: str) -> pd.DataFrame:
@@ -132,9 +158,17 @@ def load_from_mysql(table_name: str) -> pd.DataFrame:
     返回值：
         pd.DataFrame：读取到的数据。
     """
+    if not table_name or not isinstance(table_name, str):
+        raise ValueError("表名无效")
+    
     engine = build_engine()
-    df = pd.read_sql(f"SELECT * FROM {table_name}", engine)
-    return df
+    try:
+        df = pd.read_sql(f"SELECT * FROM `{table_name}`", engine)
+        if df.empty:
+            raise ValueError(f"表 {table_name} 为空")
+        return df
+    except Exception as e:
+        raise RuntimeError(f"从 MySQL 读取失败: {str(e)}")
 
 
 @dataclass

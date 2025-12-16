@@ -10,12 +10,25 @@
   </head>
   <body class="bg-light">
     <div class="container py-3">
-      <h3 class="mb-3 text-center">
-        金融爬虫 + MySQL + 机器学习综合实验（示例系统）
-      </h3>
-      <p class="text-muted small mb-3 text-center">
-        通过前端控件输入关键字或接口地址，从不同网站获取金融数据，保存到 MySQL，再使用回归、分类、聚类三类机器学习算法完成预测。
-      </p>
+      <div
+        class="d-flex flex-column flex-md-row justify-content-between align-items-md-center mb-3"
+      >
+        <div>
+          <h3 class="mb-1">
+            金融爬虫 + MySQL + 机器学习综合实验（示例系统）
+          </h3>
+          <p class="text-muted small mb-0">
+            通过前端控件输入关键字或接口地址，从不同网站获取金融数据，保存到
+            MySQL，再使用回归、分类、聚类三类机器学习算法完成预测。
+          </p>
+        </div>
+        <div class="mt-2 mt-md-0">
+          <a class="btn btn-outline-primary btn-sm me-2" href="/">返回主页面</a>
+          <a class="btn btn-outline-secondary btn-sm" href="/crawler_ml">
+            重新进入本页
+          </a>
+        </div>
+      </div>
 
       <!-- 一、爬取金融新闻 -->
       <div class="card mb-3 shadow-sm">
@@ -158,24 +171,48 @@
       document
         .getElementById("btnCrawlNews")
         .addEventListener("click", function () {
+          const btn = this;
+          const resultEl = document.getElementById("newsResult");
+          const originalText = btn.textContent;
+          
+          btn.disabled = true;
+          btn.textContent = "爬取中...";
+          resultEl.textContent = "正在爬取数据，请稍候...";
+
           const fd = new FormData();
           fd.append(
             "keyword",
-            document.getElementById("newsKeyword").value
+            document.getElementById("newsKeyword").value || "金融"
           );
-          fd.append("table_name", document.getElementById("newsTable").value);
+          fd.append("table_name", document.getElementById("newsTable").value || "news_data");
 
           fetch("/api/crawl_news", {
             method: "POST",
             body: fd,
           })
-            .then((r) => r.json())
+            .then((r) => {
+              if (!r.ok) {
+                return r.json().then(data => {
+                  throw new Error(data.msg || `HTTP ${r.status}`);
+                });
+              }
+              return r.json();
+            })
             .then((data) => {
-              document.getElementById("newsResult").textContent = pretty(data);
+              if (data.status === "error") {
+                throw new Error(data.msg || "爬取失败");
+              }
+              resultEl.textContent = pretty(data);
+              resultEl.className = "mt-2 bg-dark text-light p-2 small";
             })
             .catch((e) => {
-              document.getElementById("newsResult").textContent =
-                "请求失败：" + e;
+              resultEl.textContent = "❌ 请求失败：" + e.message;
+              resultEl.className = "mt-2 bg-danger text-light p-2 small";
+              console.error("爬取新闻失败:", e);
+            })
+            .finally(() => {
+              btn.disabled = false;
+              btn.textContent = originalText;
             });
         });
 
@@ -183,21 +220,51 @@
       document
         .getElementById("btnCrawlPrice")
         .addEventListener("click", function () {
+          const btn = this;
+          const resultEl = document.getElementById("priceResult");
+          const originalText = btn.textContent;
+          const apiUrl = document.getElementById("priceApiUrl").value.trim();
+          
+          if (!apiUrl) {
+            alert("请输入 API 接口地址");
+            return;
+          }
+          
+          btn.disabled = true;
+          btn.textContent = "爬取中...";
+          resultEl.textContent = "正在爬取价格数据，请稍候...";
+
           const fd = new FormData();
-          fd.append("api_url", document.getElementById("priceApiUrl").value);
-          fd.append("table_name", document.getElementById("priceTable").value);
+          fd.append("api_url", apiUrl);
+          fd.append("table_name", document.getElementById("priceTable").value || "financial_series");
 
           fetch("/api/crawl_price", {
             method: "POST",
             body: fd,
           })
-            .then((r) => r.json())
+            .then((r) => {
+              if (!r.ok) {
+                return r.json().then(data => {
+                  throw new Error(data.msg || `HTTP ${r.status}`);
+                });
+              }
+              return r.json();
+            })
             .then((data) => {
-              document.getElementById("priceResult").textContent = pretty(data);
+              if (data.status === "error") {
+                throw new Error(data.msg || "爬取失败");
+              }
+              resultEl.textContent = pretty(data);
+              resultEl.className = "mt-2 bg-dark text-light p-2 small";
             })
             .catch((e) => {
-              document.getElementById("priceResult").textContent =
-                "请求失败：" + e;
+              resultEl.textContent = "❌ 请求失败：" + e.message;
+              resultEl.className = "mt-2 bg-danger text-light p-2 small";
+              console.error("爬取价格失败:", e);
+            })
+            .finally(() => {
+              btn.disabled = false;
+              btn.textContent = originalText;
             });
         });
 
@@ -205,22 +272,52 @@
       document
         .getElementById("btnRunML")
         .addEventListener("click", function () {
+          const btn = this;
+          const resultEl = document.getElementById("mlResult");
+          const originalText = btn.textContent;
+          const features = document.getElementById("mlFeatures").value.trim();
+          
+          if (!features) {
+            alert("请输入特征列名（逗号分隔）");
+            return;
+          }
+          
+          btn.disabled = true;
+          btn.textContent = "运行中...";
+          resultEl.textContent = "正在运行机器学习模型，这可能需要几秒钟...";
+
           const fd = new FormData();
-          fd.append("table_name", document.getElementById("mlTable").value);
-          fd.append("feature_cols", document.getElementById("mlFeatures").value);
-          fd.append("target_col", document.getElementById("mlTarget").value);
+          fd.append("table_name", document.getElementById("mlTable").value || "financial_series");
+          fd.append("feature_cols", features);
+          fd.append("target_col", document.getElementById("mlTarget").value.trim());
 
           fetch("/api/run_ml", {
             method: "POST",
             body: fd,
           })
-            .then((r) => r.json())
+            .then((r) => {
+              if (!r.ok) {
+                return r.json().then(data => {
+                  throw new Error(data.msg || `HTTP ${r.status}`);
+                });
+              }
+              return r.json();
+            })
             .then((data) => {
-              document.getElementById("mlResult").textContent = pretty(data);
+              if (data.status === "error") {
+                throw new Error(data.msg || "运行失败");
+              }
+              resultEl.textContent = pretty(data);
+              resultEl.className = "mt-2 bg-dark text-light p-2 small";
             })
             .catch((e) => {
-              document.getElementById("mlResult").textContent =
-                "请求失败：" + e;
+              resultEl.textContent = "❌ 请求失败：" + e.message;
+              resultEl.className = "mt-2 bg-danger text-light p-2 small";
+              console.error("运行机器学习失败:", e);
+            })
+            .finally(() => {
+              btn.disabled = false;
+              btn.textContent = originalText;
             });
         });
     </script>
