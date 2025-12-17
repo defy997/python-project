@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 import requests
+import pymysql
 from flask import (
     Flask,
     jsonify,
@@ -48,6 +50,7 @@ from crawler_ml import (
     save_to_mysql,
 )
 from utils import handle_api_errors, logger, validate_dataframe
+from db_config import DB_CONFIG
 
 try:
     import tushare as ts
@@ -66,6 +69,24 @@ TUSHARE_TOKEN = os.getenv(
 )
 
 app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR))
+
+
+def get_mysql_connection():
+    """
+    函数名称：get_mysql_connection
+    函数功能：根据 DB_CONFIG 创建一个 MySQL 连接。
+    返回值：
+        pymysql.Connection：数据库连接对象。
+    """
+    return pymysql.connect(
+        host=DB_CONFIG["host"],
+        port=DB_CONFIG["port"],
+        user=DB_CONFIG["user"],
+        password=DB_CONFIG["password"],
+        database=DB_CONFIG["database"],
+        charset=DB_CONFIG["charset"],
+        cursorclass=pymysql.cursors.DictCursor,
+    )
 
 
 def _extract_text_list_from_df(df: pd.DataFrame) -> List[str]:
@@ -531,11 +552,21 @@ def _fetch_tushare_indices() -> Dict[str, Any]:
         missing: List[str] = []
 
         for name, code in indices.items():
-            try:
-                df_idx = pro.index_daily(ts_code=code, start_date=start_str, end_date=end_str)
-            except Exception as e:
-                logger.warning(f"获取指数 {code} 失败: {e}")
-                df_idx = pd.DataFrame()
+            # 若临时网络抖动 / TuShare 偶发返回空数据，这里做多次尝试
+            df_idx = pd.DataFrame()
+            max_attempts = 10
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    df_idx = pro.index_daily(ts_code=code, start_date=start_str, end_date=end_str)
+                    if not df_idx.empty:
+                        break
+                    logger.warning(f"指数 {code} 第 {attempt} 次返回空数据，准备重试")
+                except Exception as e:
+                    logger.warning(f"获取指数 {code} 第 {attempt} 次失败: {e}")
+
+                # 简单退避，避免瞬间连发
+                if attempt < max_attempts:
+                    time.sleep(0.6 * attempt)
 
             if df_idx.empty:
                 missing.append(name)
@@ -657,7 +688,7 @@ def api_ts_market():
 def _build_mock_fx() -> Dict[str, Any]:
     """
     函数名称：_build_mock_fx
-    函数功能：在外汇数据无法从 TuShare 获取时，构造一组示例货币数据。
+    函数功能：在外汇数据无法从数据库或 TuShare 获取时，构造一组示例货币数据（不包含比特币）。
     返回值：
         Dict：包含 currencies 列表。
     """
@@ -667,9 +698,128 @@ def _build_mock_fx() -> Dict[str, Any]:
             {"name": "英镑", "symbol": "GBP/USD", "price": 1.1825, "chg": -0.0005, "pct": 0.0, "date": today},
             {"name": "日元", "symbol": "JPY/USD", "price": 136.1876, "chg": -0.0715, "pct": -0.7, "date": today},
             {"name": "欧元", "symbol": "EUR/USD", "price": 0.9982, "chg": -0.0016, "pct": -0.2, "date": today},
-            {"name": "比特币", "symbol": "BTC/USD", "price": 21318.87, "chg": -132.18, "pct": -0.6, "date": today},
         ]
     }
+
+
+def _fetch_eastmoney_fx() -> Dict[str, Any]:
+    """
+    函数名称：_fetch_eastmoney_fx
+    函数功能：从东方财富外汇频道（https://forex.eastmoney.com/）爬取“人民币中间价”相关外汇数据。
+    说明：
+        - 使用 requests 获取网页 HTML；
+        - 使用 pandas.read_html 解析页面中的表格；
+        - 通过包含“人民币”和“最新价”的表格作为候选，构造 currencies 列表。
+    返回值：
+        Dict：包含 currencies 列表。
+    """
+    url = "https://forex.eastmoney.com/"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/129.0 Safari/537.36"
+        ),
+        "Referer": "https://forex.eastmoney.com/",
+    }
+
+    resp = requests.get(url, headers=headers, timeout=10)
+    resp.raise_for_status()
+    resp.encoding = resp.apparent_encoding
+
+    # 从 HTML 中解析所有表格
+    tables: List[pd.DataFrame] = pd.read_html(resp.text)
+
+    target_df: pd.DataFrame | None = None
+
+    # 通过包含“人民币”和列名中有“最新价”的表格，大概率就是“人民币中间价”
+    for df in tables:
+        col_str = "".join(map(str, df.columns))
+        if "最新价" not in col_str:
+            continue
+
+        # 将整个表展开为字符串，便于判断是否涉及“人民币”
+        try:
+            content_str = col_str + "".join(df.astype(str).fillna("").values.ravel())
+        except Exception:
+            content_str = col_str
+
+        if "人民币" in content_str:
+            target_df = df
+            break
+
+    if target_df is None or target_df.empty:
+        raise RuntimeError("未在东方财富页面中识别到人民币中间价表格")
+
+    # 期望的列：代码 / 名称 / 最新价 / 涨跌额 / 涨跌幅 ...
+    # 适配一下列名，避免页面有轻微调整导致 KeyError
+    col_map = {}
+    for col in target_df.columns:
+        col_str = str(col)
+        if "代码" in col_str and "code" not in col_map:
+            col_map["code"] = col
+        elif ("名称" in col_str or "币种" in col_str) and "name" not in col_map:
+            col_map["name"] = col
+        elif "最新价" in col_str and "price" not in col_map:
+            col_map["price"] = col
+        elif "涨跌额" in col_str and "chg" not in col_map:
+            col_map["chg"] = col
+        elif "涨跌幅" in col_str and "pct" not in col_map:
+            col_map["pct"] = col
+
+    required_keys = ["name", "price"]
+    if not all(k in col_map for k in required_keys):
+        raise RuntimeError(f"人民币中间价表格列名不符合预期: {target_df.columns}")
+
+    currencies: List[Dict[str, Any]] = []
+    today = datetime.today().strftime("%Y-%m-%d")
+
+    for _, row in target_df.iterrows():
+        try:
+            name = str(row[col_map.get("name", "")]).strip()
+            if not name:
+                continue
+
+            code = str(row[col_map.get("code", "")]).strip() if "code" in col_map else ""
+            symbol = code if code else name
+
+            # 最新价
+            price_raw = row[col_map["price"]]
+            price = float(str(price_raw).replace(",", "").strip()) if price_raw not in ("", None) else 0.0
+
+            # 涨跌额
+            chg_raw = row[col_map.get("chg", col_map["price"])]
+            try:
+                chg = float(str(chg_raw).replace(",", "").strip())
+            except Exception:
+                chg = 0.0
+
+            # 涨跌幅（百分比，形如 "0.25%"）
+            pct_raw = row[col_map.get("pct", col_map["price"])]
+            pct_str = str(pct_raw).replace("%", "").replace(",", "").strip()
+            try:
+                pct = float(pct_str)
+            except Exception:
+                pct = 0.0
+
+            currencies.append(
+                {
+                    "name": name,
+                    "symbol": symbol,
+                    "price": round(price, 6),
+                    "chg": round(chg, 6),
+                    "pct": round(pct, 2),
+                    "date": today,
+                }
+            )
+        except Exception:
+            # 单行出错时跳过，继续处理后续行
+            continue
+
+    if not currencies:
+        raise RuntimeError("未能从人民币中间价表格中解析出有效数据行")
+
+    return {"currencies": currencies}
 
 
 def _fetch_tushare_fx() -> Dict[str, Any]:
@@ -736,19 +886,129 @@ def _fetch_tushare_fx() -> Dict[str, Any]:
     if not rows:
         raise RuntimeError("未从 TuShare 获取到外汇数据")
 
-    # 加入比特币占位数据，TuShare 加密货币接口在此略去，可按需扩展
-    rows.append(
-        {
-            "name": "比特币",
-            "symbol": "BTC/USD",
-            "price": 21318.87,
-            "chg": -132.18,
-            "pct": -0.6,
-            "date": datetime.today().strftime("%Y-%m-%d"),
-        }
-    )
-
     return {"currencies": rows}
+
+
+def _fx_table_mapping() -> Dict[str, Dict[str, str]]:
+    """
+    函数名称：_fx_table_mapping
+    函数功能：返回外汇货币对与 MySQL 表名/展示名称之间的映射。
+    返回值：
+        Dict：key 为简写货币对（如 USDCNY），value 为包含表名和展示名的字典。
+    """
+    return {
+        # 直接使用表中存储的 USD/CNY 作为美元对人民币
+        "USDCNY": {
+            "mode": "direct",
+            "table": "fx_usdcny",
+            "name": "美元/人民币",
+            "symbol": "USD/CNY",
+        },
+        # 通过交叉汇率，将 USD/CNY 和 USD/GBP 转成 GBP/CNY = (USD/CNY) / (USD/GBP)
+        "GBPCNY": {
+            "mode": "cross",
+            "table": "fx_usdgbp",  # 存储的是 USD/GBP
+            "name": "英镑/人民币",
+            "symbol": "GBP/CNY",
+        },
+        # 通过交叉汇率，将 USD/CNY 和 USD/JPY 转成 JPY/CNY = (USD/CNY) / (USD/JPY)
+        "JPYCNY": {
+            "mode": "cross",
+            "table": "fx_usdjpy",  # 存储的是 USD/JPY
+            "name": "日元/人民币",
+            "symbol": "JPY/CNY",
+        },
+    }
+
+
+def _fetch_db_fx_overview() -> Dict[str, Any]:
+    """
+    函数名称：_fetch_db_fx_overview
+    函数功能：从 MySQL 中读取各外汇表最近两个交易日的数据，计算最新价格和涨跌幅。
+    返回值：
+        Dict：包含 currencies 列表（不含比特币）。
+    """
+    mapping = _fx_table_mapping()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+
+    currencies: List[Dict[str, Any]] = []
+
+    try:
+        # 先取出 USD/CNY 的最近两天，作为交叉汇率的基础
+        cursor.execute("SELECT date, close FROM `fx_usdcny` ORDER BY date DESC LIMIT 2")
+        base_rows = cursor.fetchall()
+        if not base_rows:
+            raise RuntimeError("fx_usdcny 表中无数据")
+
+        base_latest = base_rows[0]
+        base_prev = base_rows[1] if len(base_rows) > 1 else base_rows[0]
+        base_latest_price = float(base_latest["close"])
+        base_prev_price = float(base_prev["close"]) if base_prev["close"] is not None else base_latest_price
+
+        # 1) 美元/人民币：直接使用 fx_usdcny
+        date_val = base_latest["date"]
+        if isinstance(date_val, datetime):
+            date_str = date_val.strftime("%Y-%m-%d")
+        else:
+            date_str = str(date_val)
+
+        usd_info = mapping["USDCNY"]
+        usd_chg = round(base_latest_price - base_prev_price, 6)
+        usd_pct = round((base_latest_price / base_prev_price - 1.0) * 100, 2) if base_prev_price else 0.0
+
+        currencies.append(
+            {
+                "name": usd_info["name"],
+                "symbol": usd_info["symbol"],
+                "price": round(base_latest_price, 6),
+                "chg": usd_chg,
+                "pct": usd_pct,
+                "date": date_str,
+                "pair": "USDCNY",
+            }
+        )
+
+        # 2) 其他币种相对人民币，通过交叉汇率计算（GBP/CNY、JPY/CNY）
+        for pair in ["GBPCNY", "JPYCNY"]:
+            info = mapping[pair]
+            table = info["table"]
+            # 对应 fx_usdgbp / fx_usdjpy 的最近两天
+            sql = f"SELECT date, close FROM `{table}` ORDER BY date DESC LIMIT 2"
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            if not rows:
+                continue
+
+            cross_latest = rows[0]
+            cross_prev = rows[1] if len(rows) > 1 else rows[0]
+            cross_latest_price = float(cross_latest["close"])
+            cross_prev_price = float(cross_prev["close"]) if cross_prev["close"] is not None else cross_latest_price
+
+            # 使用交叉汇率：X/CNY = (USD/CNY) / (USD/X)
+            latest_rate = base_latest_price / cross_latest_price if cross_latest_price else 0.0
+            prev_rate = base_prev_price / cross_prev_price if cross_prev_price else latest_rate
+            chg = round(latest_rate - prev_rate, 6)
+            pct = round((latest_rate / prev_rate - 1.0) * 100, 2) if prev_rate else 0.0
+
+            currencies.append(
+                {
+                    "name": info["name"],
+                    "symbol": info["symbol"],
+                    "price": round(latest_rate, 6),
+                    "chg": chg,
+                    "pct": pct,
+                    "date": date_str,
+                    "pair": pair,
+                }
+            )
+    finally:
+        conn.close()
+
+    if not currencies:
+        raise RuntimeError("数据库中未找到任何外汇数据")
+
+    return {"currencies": currencies}
 
 
 @app.route("/api/ts_fx", methods=["GET"])
@@ -756,17 +1016,121 @@ def _fetch_tushare_fx() -> Dict[str, Any]:
 def api_ts_fx():
     """
     函数名称：api_ts_fx
-    函数功能：返回若干主要货币/比特币相对美元的价格与涨跌幅。
-    说明：优先通过 TuShare 获取实时外汇数据，失败时回退到示例数据。
+    函数功能：返回若干主要货币的价格与涨跌幅（数据来源：本地 MySQL 外汇表）。
+    说明：
+        1. 优先从 MySQL 中已保存的 fx_usdcny / fx_usdgbp / fx_usdjpy 等表读取最近交易日数据；
+        2. 若数据库中暂无数据，则回退到 TuShare 或示例数据。
     返回值：
         JSON：包含 currencies 列表。
     """
     try:
-        data = _fetch_tushare_fx()
+        data = _fetch_db_fx_overview()
     except Exception as e:
-        logger.warning(f"TuShare 外汇获取失败，使用示例数据: {e}")
-        data = _build_mock_fx()
+        logger.warning(f"从数据库读取外汇数据失败，尝试 TuShare: {e}")
+        try:
+            data = _fetch_tushare_fx()
+        except Exception as e2:
+            logger.warning(f"TuShare 外汇获取失败，使用示例数据: {e2}")
+            data = _build_mock_fx()
     return jsonify({"status": "ok", **data})
+
+
+@app.route("/api/fx_history", methods=["GET"])
+@handle_api_errors
+def api_fx_history():
+    """
+    函数名称：api_fx_history
+    函数功能：根据指定外汇货币对，从 MySQL 中返回最近一段时间的“相对人民币”的收盘价序列，用于前端折线图展示。
+    前端可传入参数（query string）：
+        pair：货币对简写，如 USDCNY / GBPCNY / JPYCNY（默认 USDCNY）；
+        days：向前追溯的天数，默认 30 天。
+    返回值：
+        JSON：包含 dates、closes 等信息。
+    """
+    pair = request.args.get("pair", "USDCNY").upper().replace("/", "")
+    try:
+        days = int(request.args.get("days", "30") or 30)
+    except ValueError:
+        days = 30
+    days = max(1, min(days, 365))
+
+    mapping = _fx_table_mapping()
+    if pair not in mapping:
+        return jsonify({"status": "error", "msg": f"不支持的货币对: {pair}"}), 400
+
+    name = mapping[pair]["name"]
+    symbol = mapping[pair]["symbol"]
+
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+
+    start_date = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    try:
+        if pair == "USDCNY":
+            # 直接从 fx_usdcny 读取
+            sql = "SELECT date, close FROM `fx_usdcny` WHERE date >= %s ORDER BY date ASC"
+            cursor.execute(sql, (start_date,))
+            rows = cursor.fetchall()
+        elif pair in ("GBPCNY", "JPYCNY"):
+            # 通过交叉汇率：X/CNY = (USD/CNY) / (USD/X)，按日期做内连接
+            if pair == "GBPCNY":
+                cross_table = "fx_usdgbp"
+            else:
+                cross_table = "fx_usdjpy"
+
+            sql = f"""
+                SELECT a.date AS date,
+                       a.close AS usdcny_close,
+                       b.close AS cross_close
+                FROM `fx_usdcny` a
+                JOIN `{cross_table}` b ON a.date = b.date
+                WHERE a.date >= %s
+                ORDER BY a.date ASC
+            """
+            cursor.execute(sql, (start_date,))
+            rows = cursor.fetchall()
+        else:
+            rows = []
+    finally:
+        conn.close()
+
+    if not rows:
+        return jsonify({"status": "error", "msg": f"{pair} 在最近 {days} 天内无数据"}), 400
+
+    dates: List[str] = []
+    closes: List[float] = []
+
+    if pair == "USDCNY":
+        for r in rows:
+            d = r["date"]
+            if isinstance(d, datetime):
+                dates.append(d.strftime("%Y-%m-%d"))
+            else:
+                dates.append(str(d))
+            closes.append(float(r["close"]) if r["close"] is not None else 0.0)
+    else:
+        for r in rows:
+            d = r["date"]
+            if isinstance(d, datetime):
+                dates.append(d.strftime("%Y-%m-%d"))
+            else:
+                dates.append(str(d))
+            usdcny_close = float(r["usdcny_close"])
+            cross_close = float(r["cross_close"])
+            rate = usdcny_close / cross_close if cross_close else 0.0
+            closes.append(rate)
+
+    return jsonify(
+        {
+            "status": "ok",
+            "pair": pair,
+            "name": name,
+            "symbol": symbol,
+            "dates": dates,
+            "closes": closes,
+        }
+    )
 
 
 @app.route("/api/ts_stock_range", methods=["POST"])
@@ -796,11 +1160,25 @@ def api_ts_stock_range():
         return jsonify({"status": "error", "msg": "股票代码与起止日期均不能为空"}), 400
 
     pro = ts.pro_api(TUSHARE_TOKEN)
-    try:
-        df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
-    except Exception as e:
-        logger.error(f"拉取股票 {ts_code} 区间数据失败: {e}")
-        return jsonify({"status": "error", "msg": f"拉取股票数据失败: {str(e)}"}), 500
+    df = pd.DataFrame()
+    max_attempts = 10
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+            if not df.empty:
+                break
+            logger.warning(f"股票 {ts_code} 第 {attempt} 次返回空数据，准备重试")
+        except Exception as e:
+            last_err = e
+            logger.warning(f"拉取股票 {ts_code} 区间数据第 {attempt} 次失败: {e}")
+
+        if attempt < max_attempts:
+            time.sleep(0.6 * attempt)
+
+    if df.empty and last_err is not None:
+        logger.error(f"拉取股票 {ts_code} 区间数据多次失败，最后一次错误: {last_err}")
+        return jsonify({"status": "error", "msg": f"拉取股票数据失败: {str(last_err)}"}), 500
 
     if df.empty:
         return jsonify({"status": "error", "msg": "指定区间内无交易数据"}), 400

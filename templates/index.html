@@ -238,10 +238,10 @@
             <div class="card mt-3">
               <div class="card-body p-2">
                 <div class="d-flex justify-content-between align-items-center mb-2">
-                  <div class="section-title mb-0" style="font-size: 0.95rem;">货币（相对美元）</div>
+                  <div class="section-title mb-0" style="font-size: 0.95rem;">货币（相对人民币）</div>
                   <button class="btn btn-outline-secondary btn-sm" id="fxBtn">刷新货币报价</button>
                 </div>
-                <div class="table-responsive">
+                <div class="table-responsive mb-2">
                   <table class="table table-sm table-striped mb-0" id="fxTable">
                     <thead>
                       <tr>
@@ -255,6 +255,10 @@
                     <tbody></tbody>
                   </table>
                 </div>
+                <div class="small text-muted mb-1">
+                  提示：点击上表中的“美元/人民币、英镑/人民币、日元/人民币”任意一行，可查看近期走势折线图。
+                </div>
+                <div id="fxChart" style="height:260px;"></div>
               </div>
             </div>
 
@@ -493,6 +497,15 @@
         document.getElementById("predictChart")
       );
 
+      // 外汇折线图：页面初始时可能处于隐藏分页，直接 init 会导致 0 宽高渲染失败
+      function getFxChart() {
+        const dom = document.getElementById("fxChart");
+        if (!dom) return null;
+        let inst = echarts.getInstanceByDom(dom);
+        if (!inst) inst = echarts.init(dom);
+        return inst;
+      }
+
       // 侧边栏分页切换
       const sectionBlocks = document.querySelectorAll(".section-block");
       const sideLinks = document.querySelectorAll("#sideNav a[data-target]");
@@ -515,6 +528,14 @@
             loadFx();
           }
           predictLoaded = true;
+        }
+
+        // 切换到外汇所在分页后，强制 resize，避免图表容器初始宽高为 0
+        if (id === "section-predict") {
+          setTimeout(() => {
+            const c = getFxChart();
+            if (c) c.resize();
+          }, 0);
         }
       }
 
@@ -758,6 +779,12 @@
         tbody.innerHTML = "";
         (data.currencies || []).forEach((row) => {
           const tr = document.createElement("tr");
+          if (row.pair) {
+            tr.dataset.pair = row.pair;
+            tr.dataset.name = row.name || "";
+            tr.style.cursor = "pointer";
+            tr.title = "点击查看近期走势";
+          }
           tr.innerHTML = `
             <td>${row.name}</td>
             <td>${row.symbol}</td>
@@ -766,6 +793,93 @@
             <td class="${row.pct >= 0 ? "text-success" : "text-danger"}">${row.pct}%</td>
           `;
           tbody.appendChild(tr);
+        });
+      }
+
+      /**
+       * 加载单个货币对的近期走势（相对人民币）
+       */
+      function loadFxHistory(pair, name) {
+        const days = 60; // 默认查看近 60 天
+        fetch(`/api/fx_history?pair=${encodeURIComponent(pair)}&days=${days}`)
+          .then((r) => {
+            if (!r.ok) {
+              return r.json().then((d) => {
+                throw new Error(d.msg || `HTTP ${r.status}`);
+              });
+            }
+            return r.json();
+          })
+          .then((d) => {
+            if (d.status === "error") {
+              throw new Error(d.msg || "拉取失败");
+            }
+            const dates = d.dates || [];
+            const closes = d.closes || [];
+            const fxChart = getFxChart();
+            if (!fxChart) return;
+
+            // y 轴区间：默认按数据自适应并加边距；USDCNY 可按 8~10 展示
+            let yMin = null;
+            let yMax = null;
+            const nums = (closes || []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+            if (nums.length > 0) {
+              const minV = Math.min(...nums);
+              const maxV = Math.max(...nums);
+              const span = Math.max(1e-9, maxV - minV);
+              const pad = span * 0.08; // 8% 边距
+              yMin = minV - pad;
+              yMax = maxV + pad;
+            }
+
+            // 美元/人民币：优先用 7~8 的可读区间，但不截断真实数据
+            if (pair === "USDCNY") {
+              const preferMin = 7;
+              const preferMax = 8;
+              if (yMin == null || yMax == null) {
+                yMin = preferMin;
+                yMax = preferMax;
+              } else {
+                yMin = Math.min(yMin, preferMin);
+                yMax = Math.max(yMax, preferMax);
+              }
+            }
+
+            fxChart.setOption({
+              tooltip: { trigger: "axis" },
+              title: {
+                text: `${d.name || name} 近期走势（相对人民币）`,
+                left: "center",
+                textStyle: { fontSize: 12 },
+              },
+              xAxis: { type: "category", data: dates },
+              yAxis: { type: "value", name: "汇率", min: yMin, max: yMax },
+              series: [
+                {
+                  name: d.symbol || pair,
+                  type: "line",
+                  smooth: true,
+                  data: closes,
+                },
+              ],
+            });
+            // 确保在可见尺寸下渲染
+            setTimeout(() => fxChart.resize(), 0);
+          })
+          .catch((e) => {
+            alert("货币历史数据拉取失败：" + e.message);
+          });
+      }
+
+      // 货币表：使用事件委托，避免重复绑定或渲染后丢失事件
+      const fxTbody = document.querySelector("#fxTable tbody");
+      if (fxTbody) {
+        fxTbody.addEventListener("click", (ev) => {
+          const tr = ev.target && ev.target.closest ? ev.target.closest("tr") : null;
+          if (!tr) return;
+          const pair = tr.dataset.pair;
+          if (!pair) return;
+          loadFxHistory(pair, tr.dataset.name || pair);
         });
       }
 
