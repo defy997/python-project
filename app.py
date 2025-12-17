@@ -89,6 +89,170 @@ def get_mysql_connection():
     )
 
 
+@app.route("/api/db_info", methods=["GET"])
+def api_db_info():
+    """用于排查：当前后端连接的是哪个 MySQL 实例/数据库（不返回密码）。"""
+    return jsonify(
+        {
+            "status": "ok",
+            "host": DB_CONFIG.get("host"),
+            "port": DB_CONFIG.get("port"),
+            "user": DB_CONFIG.get("user"),
+            "database": DB_CONFIG.get("database"),
+            "charset": DB_CONFIG.get("charset"),
+        }
+    )
+
+
+def _ensure_ts_index_daily_table(cursor) -> None:
+    """确保 TuShare 指数日线表存在（ts_code + trade_date 唯一）。"""
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_index_daily (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            ts_code VARCHAR(20) NOT NULL,
+            trade_date DATE NOT NULL,
+            open DOUBLE NULL,
+            high DOUBLE NULL,
+            low DOUBLE NULL,
+            close DOUBLE NULL,
+            pre_close DOUBLE NULL,
+            change_ DOUBLE NULL,
+            pct_chg DOUBLE NULL,
+            vol DOUBLE NULL,
+            amount DOUBLE NULL,
+            UNIQUE KEY uniq_ts_code_trade_date (ts_code, trade_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+
+
+def _ensure_ts_stock_daily_table(cursor) -> None:
+    """确保 TuShare 股票日线表存在（ts_code + trade_date 唯一）。"""
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_stock_daily (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            ts_code VARCHAR(20) NOT NULL,
+            trade_date DATE NOT NULL,
+            open DOUBLE NULL,
+            high DOUBLE NULL,
+            low DOUBLE NULL,
+            close DOUBLE NULL,
+            pre_close DOUBLE NULL,
+            change_ DOUBLE NULL,
+            pct_chg DOUBLE NULL,
+            vol DOUBLE NULL,
+            amount DOUBLE NULL,
+            UNIQUE KEY uniq_ts_code_trade_date (ts_code, trade_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+
+
+def _save_tushare_index_daily_to_mysql(df_idx: pd.DataFrame, ts_code: str) -> int:
+    """
+    将 TuShare 指数日线数据写入 MySQL（upsert）。
+    返回写入（尝试写入）的行数。
+    """
+    if df_idx is None or df_idx.empty:
+        return 0
+
+    df = df_idx.copy()
+    df["ts_code"] = ts_code
+
+    # TuShare 通常给 trade_date 为 YYYYMMDD 字符串/数字
+    if "trade_date" in df.columns:
+        df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str), format="%Y%m%d", errors="coerce").dt.date
+
+    # 统一字段名：MySQL 列 change_ 避免与关键字冲突
+    if "change" in df.columns:
+        df = df.rename(columns={"change": "change_"})
+
+    cols = ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change_", "pct_chg", "vol", "amount"]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+
+    records = df[cols].where(pd.notna(df[cols]), None).to_dict(orient="records")
+
+    conn = get_mysql_connection()
+    try:
+        cur = conn.cursor()
+        _ensure_ts_index_daily_table(cur)
+        sql = """
+            INSERT INTO ts_index_daily
+                (ts_code, trade_date, open, high, low, close, pre_close, change_, pct_chg, vol, amount)
+            VALUES
+                (%(ts_code)s, %(trade_date)s, %(open)s, %(high)s, %(low)s, %(close)s, %(pre_close)s, %(change_)s, %(pct_chg)s, %(vol)s, %(amount)s)
+            ON DUPLICATE KEY UPDATE
+                open=VALUES(open),
+                high=VALUES(high),
+                low=VALUES(low),
+                close=VALUES(close),
+                pre_close=VALUES(pre_close),
+                change_=VALUES(change_),
+                pct_chg=VALUES(pct_chg),
+                vol=VALUES(vol),
+                amount=VALUES(amount);
+        """
+        cur.executemany(sql, records)
+        conn.commit()
+        return len(records)
+    finally:
+        conn.close()
+
+
+def _save_tushare_stock_daily_to_mysql(df_daily: pd.DataFrame) -> int:
+    """
+    将 TuShare 股票日线数据写入 MySQL（upsert）。
+    返回写入（尝试写入）的行数。
+    """
+    if df_daily is None or df_daily.empty:
+        return 0
+
+    df = df_daily.copy()
+
+    if "trade_date" in df.columns:
+        df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str), format="%Y%m%d", errors="coerce").dt.date
+
+    if "change" in df.columns:
+        df = df.rename(columns={"change": "change_"})
+
+    cols = ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change_", "pct_chg", "vol", "amount"]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+
+    records = df[cols].where(pd.notna(df[cols]), None).to_dict(orient="records")
+
+    conn = get_mysql_connection()
+    try:
+        cur = conn.cursor()
+        _ensure_ts_stock_daily_table(cur)
+        sql = """
+            INSERT INTO ts_stock_daily
+                (ts_code, trade_date, open, high, low, close, pre_close, change_, pct_chg, vol, amount)
+            VALUES
+                (%(ts_code)s, %(trade_date)s, %(open)s, %(high)s, %(low)s, %(close)s, %(pre_close)s, %(change_)s, %(pct_chg)s, %(vol)s, %(amount)s)
+            ON DUPLICATE KEY UPDATE
+                open=VALUES(open),
+                high=VALUES(high),
+                low=VALUES(low),
+                close=VALUES(close),
+                pre_close=VALUES(pre_close),
+                change_=VALUES(change_),
+                pct_chg=VALUES(pct_chg),
+                vol=VALUES(vol),
+                amount=VALUES(amount);
+        """
+        cur.executemany(sql, records)
+        conn.commit()
+        return len(records)
+    finally:
+        conn.close()
+
+
 def _extract_text_list_from_df(df: pd.DataFrame) -> List[str]:
     """将 DataFrame 中的文本列拼接成列表，供词云/情感分析使用。"""
     texts: List[str] = []
@@ -571,6 +735,13 @@ def _fetch_tushare_indices() -> Dict[str, Any]:
             if df_idx.empty:
                 missing.append(name)
                 continue
+
+            # 成功获取后写入数据库（按 ts_code + trade_date upsert）
+            try:
+                saved = _save_tushare_index_daily_to_mysql(df_idx, code)
+                logger.info(f"指数 {code} 已写入数据库 ts_index_daily，记录数: {saved}")
+            except Exception as e:
+                logger.warning(f"指数 {code} 写入数据库失败（不影响前端展示）: {e}")
 
             # 按日期升序
             df_idx = df_idx.sort_values("trade_date")
@@ -1182,6 +1353,13 @@ def api_ts_stock_range():
 
     if df.empty:
         return jsonify({"status": "error", "msg": "指定区间内无交易数据"}), 400
+
+    # 写入数据库（按 ts_code + trade_date upsert），便于后续复用/离线分析
+    try:
+        saved = _save_tushare_stock_daily_to_mysql(df)
+        logger.info(f"股票 {ts_code} 日线已写入数据库 ts_stock_daily，记录数: {saved}")
+    except Exception as e:
+        logger.warning(f"股票 {ts_code} 写入数据库失败（不影响前端展示）: {e}")
 
     # 按日期升序
     df = df.sort_values("trade_date")
