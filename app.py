@@ -68,6 +68,9 @@ TUSHARE_TOKEN = os.getenv(
     "9d41733e4997a12f4eac28b57f9d1337eacad86f5f980ebe5370162f",
 )
 
+# Alpha Vantage Key（用于外汇），可通过环境变量覆盖
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "CCJFY081XLOZMKZO")
+
 app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR))
 
 
@@ -251,6 +254,515 @@ def _save_tushare_stock_daily_to_mysql(df_daily: pd.DataFrame) -> int:
         return len(records)
     finally:
         conn.close()
+
+
+def _ensure_ts_flash_table(cursor) -> None:
+    """确保 TuShare 短讯表存在（按 id 唯一）。"""
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_flash (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            ts_id VARCHAR(64) NOT NULL,
+            pub_time DATETIME NULL,
+            title VARCHAR(512) NULL,
+            content TEXT NULL,
+            src VARCHAR(64) NULL,
+            UNIQUE KEY uniq_ts_id (ts_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+
+
+def _save_ts_flash_to_mysql(items: List[Dict[str, Any]]) -> int:
+    """将短讯列表 upsert 写入 MySQL ts_flash 表。"""
+    if not items:
+        return 0
+    conn = get_mysql_connection()
+    try:
+        cur = conn.cursor()
+        _ensure_ts_flash_table(cur)
+        sql = """
+            INSERT INTO ts_flash (ts_id, pub_time, title, content, src)
+            VALUES (%(ts_id)s, %(pub_time)s, %(title)s, %(content)s, %(src)s)
+            ON DUPLICATE KEY UPDATE
+                pub_time=VALUES(pub_time),
+                title=VALUES(title),
+                content=VALUES(content),
+                src=VALUES(src);
+        """
+        cur.executemany(sql, items)
+        conn.commit()
+        return len(items)
+    finally:
+        conn.close()
+
+
+def _fetch_tushare_flash(
+    start_date: str = "",
+    end_date: str = "",
+    src: str = "sina",
+    limit: int = 80,
+    keyword: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    从 TuShare 拉取“菁融短讯”，优先尝试 jrdc 接口（菁融短讯），失败则回退到 news 接口。
+    参数说明：
+        start_date: 开始日期，格式：2018-11-20 09:00:00（可选，菁融短讯可能不需要）
+        end_date: 结束日期，格式：2018-11-20 09:00:00（可选，菁融短讯可能不需要）
+        src: 数据源，仅用于 news 接口回退时
+        limit: 最大返回条数（TuShare 接口最多1500条，这里做二次限制）
+        keyword: 关键词搜索（在拉取后对标题/内容进行过滤）
+    """
+    limit = max(10, min(int(limit or 80), 1500))
+
+    if ts is None:
+        raise RuntimeError("当前环境未安装 tushare 库")
+    if not TUSHARE_TOKEN:
+        raise RuntimeError("未配置 TuShare Token")
+
+    pro = ts.pro_api(TUSHARE_TOKEN)
+
+    df = pd.DataFrame()
+    last_err: Exception | None = None
+    used_interface = ""
+
+    # 优先尝试菁融短讯接口（jrdc 或其他可能的接口名）
+    jrdc_candidates = ["jrdc", "jingrong", "flash", "news_flash", "major_news"]
+    
+    for interface_name in jrdc_candidates:
+        fn = getattr(pro, interface_name, None)
+        if not callable(fn):
+            continue
+        
+        try:
+            # 尝试不同的参数组合（菁融短讯接口参数可能不同）
+            if start_date and end_date:
+                # 尝试带日期参数
+                try:
+                    df = fn(start_date=start_date, end_date=end_date)
+                except TypeError:
+                    # 如果接口不接受日期参数，尝试只传 limit
+                    try:
+                        df = fn(limit=limit)
+                    except TypeError:
+                        df = fn()
+            else:
+                # 没有日期参数时，尝试 limit 或直接调用
+                try:
+                    df = fn(limit=limit)
+                except TypeError:
+                    df = fn()
+            
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                used_interface = interface_name
+                logger.info(f"TuShare 菁融短讯接口命中：pro.{interface_name}，行数: {len(df)}")
+                break
+        except Exception as e:
+            last_err = e
+            continue
+
+    # 如果菁融短讯接口都失败，回退到 news 接口
+    if df is None or df.empty:
+        if start_date and end_date:
+            try:
+                df = pro.news(start_date=start_date, end_date=end_date, src=src)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    used_interface = "news"
+                    logger.info(f"TuShare 新闻快讯（news 接口）拉取成功，数据源: {src}，行数: {len(df)}")
+            except Exception as e:
+                last_err = e
+                logger.warning(f"TuShare news 接口也失败: {e}")
+
+    if df is None or df.empty:
+        if last_err:
+            logger.warning(f"TuShare 短讯拉取失败，使用示例数据: {last_err}")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return [
+            {"ts_id": "demo-1", "pub_time": now, "title": "示例短讯：市场情绪回暖", "content": "示例内容：风险偏好提升，资金回流。", "src": "demo"},
+            {"ts_id": "demo-2", "pub_time": now, "title": "示例短讯：汇率波动加剧", "content": "示例内容：美元指数震荡，人民币小幅波动。", "src": "demo"},
+        ]
+
+    # 标准化字段（TuShare news 接口返回的字段名）
+    cols = set(df.columns.astype(str).tolist())
+
+    def pick(*candidates: str) -> str | None:
+        for c in candidates:
+            if c in cols:
+                return c
+        return None
+
+    id_col = pick("id", "ts_id", "news_id")
+    time_col = pick("datetime", "pub_time", "time", "pub_date", "date")
+    title_col = pick("title", "headline", "name")
+    content_col = pick("content", "summary", "text")
+    src_col = pick("src", "source")
+
+    items: List[Dict[str, Any]] = []
+    for i, r in df.iterrows():
+        ts_id = str(r.get(id_col, f"ts-{i}")) if id_col else f"ts-{i}"
+        pub_time = r.get(time_col, None) if time_col else None
+        title = str(r.get(title_col, "")).strip() if title_col else ""
+        content = str(r.get(content_col, "")).strip() if content_col else ""
+        src_val = str(r.get(src_col, src)).strip() if src_col else src
+
+        # 关键词过滤（如果提供了关键词）
+        if keyword and keyword.strip():
+            keyword_lower = keyword.strip().lower()
+            title_lower = title.lower()
+            content_lower = content.lower()
+            if keyword_lower not in title_lower and keyword_lower not in content_lower:
+                continue
+
+        items.append(
+            {
+                "ts_id": ts_id,
+                "pub_time": pub_time,
+                "title": title[:512] if title else None,
+                "content": content if content else None,
+                "src": src_val[:64] if src_val else src,
+            }
+        )
+
+    # 限制返回条数
+    return items[:limit]
+
+
+def _fetch_sina_flash(
+    limit: int = 80,
+    keyword: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    函数名称：_fetch_sina_flash
+    函数功能：从新浪财经 7x24 快讯接口获取金融资讯。
+    参数说明：
+        limit: 最大返回条数（默认 80）；
+        keyword: 关键词过滤（可选，在标题和内容中匹配）。
+    返回值：
+        List[Dict]：与 _fetch_tushare_flash 返回结构兼容的 items 列表。
+    """
+    import json as _json
+
+    limit = max(10, min(int(limit or 80), 200))
+    search_keyword = keyword.strip() if keyword and keyword.strip() else ""
+
+    # 新浪财经 7x24 快讯 API
+    url = f"https://zhibo.sina.com.cn/api/zhibo/feed?callback=callback&page=1&page_size={limit}&zhibo_id=152&tag_id=0&dire=f&dpc=1"
+    
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/129.0 Safari/537.36"
+        ),
+        "Referer": "https://finance.sina.com.cn/",
+        "Accept": "*/*",
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        text = resp.text
+
+        # 从 JSONP 响应中提取 JSON
+        m = re.search(r'callback\s*\(\s*(\{.*\})\s*\)', text, re.S)
+        if not m:
+            try:
+                data = _json.loads(text)
+            except Exception:
+                raise RuntimeError("未能从新浪快讯 API 响应中解析 JSON")
+        else:
+            data = _json.loads(m.group(1))
+        
+        # 解析结果
+        result = data.get("result", {})
+        if isinstance(result, dict):
+            feed_data = result.get("data", {})
+            if isinstance(feed_data, dict):
+                articles = feed_data.get("feed", {}).get("list", []) or []
+            else:
+                articles = []
+        else:
+            articles = []
+
+        logger.info(f"新浪 7x24 快讯 API 返回 {len(articles)} 条")
+
+    except Exception as e:
+        logger.warning(f"新浪快讯 API 请求失败: {e}")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return [
+            {
+                "ts_id": "sina-demo-1",
+                "pub_time": now,
+                "title": "新浪快讯获取失败",
+                "content": f"API 请求异常: {str(e)[:200]}",
+                "src": "sina-demo",
+            }
+        ]
+
+    # 解析文章列表
+    results: List[Dict[str, Any]] = []
+    for i, art in enumerate(articles):
+        try:
+            content = str(art.get("rich_text", "") or art.get("content", "") or art.get("text", "")).strip()
+            content = re.sub(r'<[^>]+>', '', content).strip()
+            
+            title = str(art.get("title", "")).strip()
+            if not title:
+                title = content[:80] + "..." if len(content) > 80 else content
+            title = re.sub(r'<[^>]+>', '', title).strip()
+            
+            pub_time = art.get("create_time", "") or art.get("time", "") or art.get("date", "")
+            if isinstance(pub_time, dict):
+                pub_time = ""
+            pub_time = str(pub_time).strip() if pub_time else None
+
+            # 关键词过滤
+            if search_keyword:
+                kw_lower = search_keyword.lower()
+                if kw_lower not in title.lower() and kw_lower not in content.lower():
+                    continue
+
+            if title and len(title) > 2:
+                results.append({
+                    "ts_id": f"sina-{art.get('id', i)}",
+                    "pub_time": pub_time,
+                    "title": title[:512],
+                    "content": content[:1000] if content else None,
+                    "src": "新浪财经",
+                })
+                
+            if len(results) >= limit:
+                break
+        except Exception:
+            continue
+
+    if not results:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg = f"（关键词: {search_keyword}）" if search_keyword else ""
+        return [
+            {
+                "ts_id": "sina-empty-1",
+                "pub_time": now,
+                "title": f"新浪快讯无匹配结果{msg}",
+                "content": "请尝试其他关键词或清空关键词获取全部快讯。",
+                "src": "sina-empty",
+            }
+        ]
+
+    logger.info(f"新浪快讯解析成功，获取 {len(results)} 条" + (f"（关键词: {search_keyword}）" if search_keyword else ""))
+    return results
+
+
+def _fetch_eastmoney_flash(
+    limit: int = 80,
+    keyword: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    函数名称：_fetch_eastmoney_flash
+    函数功能：从第三方 API 获取东方财富 7x24 快讯（不依赖 TuShare，避免权限/频率限制）。
+    说明：
+        - 使用 api.guiguiya.com 的东方财富快讯接口，直接返回 JSON
+        - 若提供关键词，则在结果中做过滤
+        - 若解析失败，将回退到示例数据
+    参数说明：
+        limit: 最大返回条数（默认 80）；
+        keyword: 关键词过滤（可选，在标题和内容中匹配）。
+    返回值：
+        List[Dict]：与 _fetch_tushare_flash 返回结构兼容的 items 列表。
+    """
+    import json as _json
+
+    limit = max(10, min(int(limit or 80), 50))  # 该 API 最多返回 50 条
+    search_keyword = keyword.strip() if keyword and keyword.strip() else ""
+
+    # 第三方东方财富 7x24 快讯 API（稳定可用）
+    url = "http://api.guiguiya.com/api/hotlist/eastmoney"
+    
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/129.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        if not data.get("success"):
+            raise RuntimeError(data.get("msg", "API 返回失败"))
+        
+        articles = data.get("data", []) or []
+        logger.info(f"东方财富快讯 API 返回 {len(articles)} 条")
+
+    except Exception as e:
+        logger.warning(f"东方财富快讯 API 请求失败: {e}")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return [
+            {
+                "ts_id": "em-demo-1",
+                "pub_time": now,
+                "title": "东方财富快讯获取失败",
+                "content": f"API 请求异常: {str(e)[:200]}",
+                "src": "eastmoney-demo",
+            }
+        ]
+
+    # 解析文章列表
+    results: List[Dict[str, Any]] = []
+    for art in articles:
+        try:
+            title = str(art.get("title", "")).strip()
+            content = str(art.get("content", "")).strip()
+            pub_time = str(art.get("time", "")).strip() if art.get("time") else None
+            
+            # 关键词过滤
+            if search_keyword:
+                kw_lower = search_keyword.lower()
+                if kw_lower not in title.lower() and kw_lower not in content.lower():
+                    continue
+
+            if title and len(title) > 2:
+                results.append({
+                    "ts_id": f"em-{art.get('id', len(results))}",
+                    "pub_time": pub_time,
+                    "title": title[:512],
+                    "content": content[:1000] if content else None,
+                    "src": "东方财富",
+                })
+                
+            if len(results) >= limit:
+                break
+        except Exception:
+            continue
+
+    if not results:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg = f"（关键词: {search_keyword}）" if search_keyword else ""
+        return [
+            {
+                "ts_id": "em-empty-1",
+                "pub_time": now,
+                "title": f"东方财富快讯无匹配结果{msg}",
+                "content": "请尝试其他关键词或清空关键词获取全部快讯。",
+                "src": "eastmoney-empty",
+            }
+        ]
+
+    logger.info(f"东方财富快讯解析成功，获取 {len(results)} 条" + (f"（关键词: {search_keyword}）" if search_keyword else ""))
+    return results
+
+
+@app.route("/api/ts_flash_viz", methods=["GET"])
+@handle_api_errors
+def api_ts_flash_viz():
+    """
+    拉取 TuShare 菁融短讯（优先尝试 jrdc 等菁融短讯接口，失败则回退到 news 接口），并生成：
+      - items：短讯列表
+      - sentiment：情感分析（ai_helper.analyze_sentiment）
+      - words：词云词频（top 80）
+    同时写入 MySQL ts_flash 表（upsert）。
+    
+    参数（query string）：
+        start_date: 开始日期，格式：2018-11-20 09:00:00（可选，菁融短讯接口可能不需要）
+        end_date: 结束日期，格式：2018-11-20 09:00:00（可选，菁融短讯接口可能不需要）
+        src: 数据源，仅用于 news 接口回退时，可选：sina, wallstreetcn, 10jqka, eastmoney, yuncaijing, fenghuang, jinrongjie, cls, yicai（默认：sina）
+        limit: 最大返回条数（默认：80，最大：1500）
+        keyword: 关键词搜索（可选）
+    """
+    # 日期参数（默认今天）
+    today = datetime.today()
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
+    
+    if not start_date:
+        start_date = today.strftime("%Y-%m-%d 00:00:00")
+    if not end_date:
+        end_date = today.strftime("%Y-%m-%d 23:59:59")
+    
+    # 数据源（默认 sina）
+    src = request.args.get("src", "sina").strip() or "sina"
+    
+    # 条数限制
+    try:
+        limit = int(request.args.get("limit", "80") or 80)
+    except ValueError:
+        limit = 80
+    
+    # 关键词搜索
+    keyword = request.args.get("keyword", "").strip()
+
+    # 若选择数据源为东方财富或新浪财经，则不再调用 TuShare，直接使用第三方 API，避免 TuShare 频率/权限限制
+    if src.lower() == "eastmoney":
+        items = _fetch_eastmoney_flash(limit=limit, keyword=keyword)
+    elif src.lower() == "sina":
+        items = _fetch_sina_flash(limit=limit, keyword=keyword)
+    else:
+        items = _fetch_tushare_flash(
+            start_date=start_date,
+            end_date=end_date,
+            src=src,
+            limit=limit,
+            keyword=keyword,
+        )
+
+    # 为每条短讯单独计算情感得分，附加到 items 中（字段名：sentiment）
+    for it in items:
+        text_parts: List[str] = []
+        if it.get("title"):
+            text_parts.append(str(it["title"]))
+        if it.get("content"):
+            text_parts.append(str(it["content"]))
+        text = "\n".join(text_parts).strip()
+        if not text:
+            it["sentiment"] = {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
+            continue
+        try:
+            it["sentiment"] = analyze_sentiment(text)
+        except Exception as e:
+            logger.warning(f"单条短讯情感分析失败（ts_id={it.get('ts_id')}）: {e}")
+            it["sentiment"] = {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
+
+    # 入库（不影响前端）—— 只保存数据库需要的字段，剔除 sentiment 等额外字段
+    try:
+        items_for_db = [
+            {
+                "ts_id": it.get("ts_id"),
+                "pub_time": it.get("pub_time"),
+                "title": it.get("title"),
+                "content": it.get("content"),
+                "src": it.get("src"),
+            }
+            for it in items
+        ]
+        saved = _save_ts_flash_to_mysql(items_for_db)
+        logger.info(f"短讯已写入数据库 ts_flash，记录数: {saved}")
+    except Exception as e:
+        logger.warning(f"短讯写入数据库失败（不影响前端展示）: {e}")
+
+    texts = []
+    for it in items:
+        if it.get("title"):
+            texts.append(str(it["title"]))
+        if it.get("content"):
+            texts.append(str(it["content"]))
+    combined = "\n".join(texts)[:3000] if texts else "中性"
+    sentiment = analyze_sentiment(combined)
+    counter = _tokenize_texts(texts)
+    top_words = counter.most_common(80)
+
+    return jsonify(
+        {
+            "status": "ok",
+            "rows": int(len(items)),
+            "items": items,
+            "sentiment": sentiment,
+            "words": [{"name": w, "value": int(c)} for w, c in top_words],
+        }
+    )
 
 
 def _extract_text_list_from_df(df: pd.DataFrame) -> List[str]:
@@ -705,7 +1217,8 @@ def _fetch_tushare_indices() -> Dict[str, Any]:
         }
 
         end_date = datetime.today()
-        start_date = end_date - timedelta(days=90)
+        # 以当天为基准，向前 60 天
+        start_date = end_date - timedelta(days=60)
         end_str = end_date.strftime("%Y%m%d")
         start_str = start_date.strftime("%Y%m%d")
 
@@ -866,9 +1379,10 @@ def _build_mock_fx() -> Dict[str, Any]:
     today = datetime.today().strftime("%Y-%m-%d")
     return {
         "currencies": [
-            {"name": "英镑", "symbol": "GBP/USD", "price": 1.1825, "chg": -0.0005, "pct": 0.0, "date": today},
-            {"name": "日元", "symbol": "JPY/USD", "price": 136.1876, "chg": -0.0715, "pct": -0.7, "date": today},
-            {"name": "欧元", "symbol": "EUR/USD", "price": 0.9982, "chg": -0.0016, "pct": -0.2, "date": today},
+            {"pair": "USDCNY", "name": "美元/人民币", "symbol": "USD/CNY", "price": 7.25, "chg": 0.01, "pct": 0.14, "date": today},
+            {"pair": "GBPCNY", "name": "英镑/人民币", "symbol": "GBP/CNY", "price": 9.12, "chg": -0.02, "pct": -0.22, "date": today},
+            {"pair": "JPYCNY", "name": "日元/人民币", "symbol": "JPY/CNY", "price": 0.048, "chg": 0.0001, "pct": 0.21, "date": today},
+            {"pair": "EURCNY", "name": "欧元/人民币", "symbol": "EUR/CNY", "price": 7.90, "chg": -0.01, "pct": -0.13, "date": today},
         ]
     }
 
@@ -1019,7 +1533,8 @@ def _fetch_tushare_fx() -> Dict[str, Any]:
     }
 
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=5)
+    # 以当天为基准，向前 60 天
+    start_date = end_date - timedelta(days=60)
     end_str = end_date.strftime("%Y%m%d")
     start_str = start_date.strftime("%Y%m%d")
 
@@ -1068,116 +1583,266 @@ def _fx_table_mapping() -> Dict[str, Dict[str, str]]:
         Dict：key 为简写货币对（如 USDCNY），value 为包含表名和展示名的字典。
     """
     return {
-        # 直接使用表中存储的 USD/CNY 作为美元对人民币
-        "USDCNY": {
-            "mode": "direct",
-            "table": "fx_usdcny",
-            "name": "美元/人民币",
-            "symbol": "USD/CNY",
-        },
-        # 通过交叉汇率，将 USD/CNY 和 USD/GBP 转成 GBP/CNY = (USD/CNY) / (USD/GBP)
-        "GBPCNY": {
-            "mode": "cross",
-            "table": "fx_usdgbp",  # 存储的是 USD/GBP
-            "name": "英镑/人民币",
-            "symbol": "GBP/CNY",
-        },
-        # 通过交叉汇率，将 USD/CNY 和 USD/JPY 转成 JPY/CNY = (USD/CNY) / (USD/JPY)
-        "JPYCNY": {
-            "mode": "cross",
-            "table": "fx_usdjpy",  # 存储的是 USD/JPY
-            "name": "日元/人民币",
-            "symbol": "JPY/CNY",
-        },
+        # 外汇统一“相对人民币”展示
+        "USDCNY": {"name": "美元/人民币", "symbol": "USD/CNY"},
+        "GBPCNY": {"name": "英镑/人民币", "symbol": "GBP/CNY"},
+        "JPYCNY": {"name": "日元/人民币", "symbol": "JPY/CNY"},
+        "EURCNY": {"name": "欧元/人民币", "symbol": "EUR/CNY"},
     }
 
 
-def _fetch_db_fx_overview() -> Dict[str, Any]:
+def _fetch_alpha_vantage_fx_daily(from_symbol: str, to_symbol: str) -> Dict[str, Dict[str, str]]:
     """
-    函数名称：_fetch_db_fx_overview
-    函数功能：从 MySQL 中读取各外汇表最近两个交易日的数据，计算最新价格和涨跌幅。
+    函数名称：_fetch_alpha_vantage_fx_daily
+    函数功能：调用 Alpha Vantage FX_DAILY 接口，获取外汇日线 time series。
+    返回结构为：{date_str: {"1. open": "...", "2. high": "...", ...}, ...}
+    说明：该接口返回的日期 key 形如 "YYYY-MM-DD"。
     返回值：
-        Dict：包含 currencies 列表（不含比特币）。
+        Dict：time series 字典。
+    """
+    if not ALPHAVANTAGE_API_KEY:
+        raise RuntimeError("未配置 ALPHAVANTAGE_API_KEY")
+
+    url = (
+        "https://www.alphavantage.co/query"
+        f"?function=FX_DAILY&from_symbol={from_symbol}&to_symbol={to_symbol}"
+        f"&apikey={ALPHAVANTAGE_API_KEY}"
+    )
+    resp = requests.get(url, timeout=15)
+    data = resp.json()
+    ts = data.get("Time Series FX (Daily)", {})
+    return ts or {}
+
+
+def _ensure_fx_daily_table(cursor, table_name: str) -> None:
+    """确保 Alpha Vantage 外汇日线表存在（每个币种一张表，date 唯一）。"""
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS `{table_name}` (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            date DATE NOT NULL UNIQUE,
+            open DOUBLE NULL,
+            high DOUBLE NULL,
+            low DOUBLE NULL,
+            close DOUBLE NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+
+
+def _save_alpha_vantage_fx_series_to_mysql(ts: Dict[str, Dict[str, str]], table_name: str, limit: int = 500) -> int:
+    """
+    将 Alpha Vantage FX_DAILY time series 写入 MySQL（upsert）。
+    只写入最近 limit 条记录，避免无意义全量重复写入。
+    """
+    if not ts:
+        return 0
+
+    # 取最近 limit 天
+    items = sorted(ts.items(), key=lambda x: x[0], reverse=True)[:limit]
+    records: List[Dict[str, Any]] = []
+    for date_str, v in items:
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        def _f(key: str) -> float | None:
+            try:
+                return float(str(v.get(key, "")).replace(",", ""))
+            except Exception:
+                return None
+
+        records.append(
+            {
+                "date": d,
+                "open": _f("1. open"),
+                "high": _f("2. high"),
+                "low": _f("3. low"),
+                "close": _f("4. close"),
+            }
+        )
+
+    if not records:
+        return 0
+
+    conn = get_mysql_connection()
+    try:
+        cur = conn.cursor()
+        _ensure_fx_daily_table(cur, table_name)
+        sql = f"""
+            INSERT INTO `{table_name}` (date, open, high, low, close)
+            VALUES (%(date)s, %(open)s, %(high)s, %(low)s, %(close)s)
+            ON DUPLICATE KEY UPDATE
+                open=VALUES(open),
+                high=VALUES(high),
+                low=VALUES(low),
+                close=VALUES(close);
+        """
+        cur.executemany(sql, records)
+        conn.commit()
+        return len(records)
+    finally:
+        conn.close()
+
+
+def _maybe_refresh_fx_tables_from_alpha_vantage() -> None:
+    """
+    尝试从 Alpha Vantage 拉取并刷新本地 MySQL 外汇表缓存。
+    任意异常仅记录 warning，不影响主流程（避免前端 500）。
+    """
+    try:
+        # 使用与 test2.py 一致的四个基础表：USD/CNY, USD/GBP, USD/JPY, USD/EUR
+        for (frm, to, table) in [
+            ("USD", "CNY", "fx_usdcny"),
+            ("USD", "GBP", "fx_usdgbp"),
+            ("USD", "JPY", "fx_usdjpy"),
+            ("USD", "EUR", "fx_usdeur"),
+        ]:
+            ts = _fetch_alpha_vantage_fx_daily(frm, to)
+            if not ts:
+                continue
+            saved = _save_alpha_vantage_fx_series_to_mysql(ts, table, limit=400)
+            logger.info(f"Alpha Vantage 外汇 {frm}/{to} 已写入 {table}，记录数: {saved}")
+    except Exception as e:
+        logger.warning(f"刷新 Alpha Vantage 外汇缓存失败（将继续使用数据库现有数据/兜底）: {e}")
+
+
+def _fetch_db_fx_overview_rmb() -> Dict[str, Any]:
+    """
+    从 MySQL 的 fx_* 表读取最近两天收盘价，计算“相对人民币”的汇率概览：
+      - USD/CNY 直接取 fx_usdcny
+      - GBP/CNY = (USD/CNY) / (USD/GBP)
+      - JPY/CNY = (USD/CNY) / (USD/JPY)
+      - EUR/CNY = (USD/CNY) / (USD/EUR)
     """
     mapping = _fx_table_mapping()
     conn = get_mysql_connection()
     cursor = conn.cursor()
-
-    currencies: List[Dict[str, Any]] = []
-
     try:
-        # 先取出 USD/CNY 的最近两天，作为交叉汇率的基础
-        cursor.execute("SELECT date, close FROM `fx_usdcny` ORDER BY date DESC LIMIT 2")
-        base_rows = cursor.fetchall()
+        def latest_two(table: str):
+            cursor.execute(f"SELECT date, close FROM `{table}` ORDER BY date DESC LIMIT 2")
+            return cursor.fetchall()
+
+        base_rows = latest_two("fx_usdcny")
         if not base_rows:
             raise RuntimeError("fx_usdcny 表中无数据")
 
-        base_latest = base_rows[0]
-        base_prev = base_rows[1] if len(base_rows) > 1 else base_rows[0]
-        base_latest_price = float(base_latest["close"])
-        base_prev_price = float(base_prev["close"]) if base_prev["close"] is not None else base_latest_price
+        base_latest = float(base_rows[0]["close"])
+        base_prev = float(base_rows[1]["close"]) if len(base_rows) > 1 else base_latest
+        date_val = base_rows[0]["date"]
+        date_str = date_val.strftime("%Y-%m-%d") if hasattr(date_val, "strftime") else str(date_val)
 
-        # 1) 美元/人民币：直接使用 fx_usdcny
-        date_val = base_latest["date"]
-        if isinstance(date_val, datetime):
-            date_str = date_val.strftime("%Y-%m-%d")
-        else:
-            date_str = str(date_val)
-
-        usd_info = mapping["USDCNY"]
-        usd_chg = round(base_latest_price - base_prev_price, 6)
-        usd_pct = round((base_latest_price / base_prev_price - 1.0) * 100, 2) if base_prev_price else 0.0
-
-        currencies.append(
-            {
-                "name": usd_info["name"],
-                "symbol": usd_info["symbol"],
-                "price": round(base_latest_price, 6),
-                "chg": usd_chg,
-                "pct": usd_pct,
-                "date": date_str,
-                "pair": "USDCNY",
-            }
-        )
-
-        # 2) 其他币种相对人民币，通过交叉汇率计算（GBP/CNY、JPY/CNY）
-        for pair in ["GBPCNY", "JPYCNY"]:
-            info = mapping[pair]
-            table = info["table"]
-            # 对应 fx_usdgbp / fx_usdjpy 的最近两天
-            sql = f"SELECT date, close FROM `{table}` ORDER BY date DESC LIMIT 2"
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-            if not rows:
-                continue
-
-            cross_latest = rows[0]
-            cross_prev = rows[1] if len(rows) > 1 else rows[0]
-            cross_latest_price = float(cross_latest["close"])
-            cross_prev_price = float(cross_prev["close"]) if cross_prev["close"] is not None else cross_latest_price
-
-            # 使用交叉汇率：X/CNY = (USD/CNY) / (USD/X)
-            latest_rate = base_latest_price / cross_latest_price if cross_latest_price else 0.0
-            prev_rate = base_prev_price / cross_prev_price if cross_prev_price else latest_rate
+        def build_row(pair: str, latest_rate: float, prev_rate: float):
             chg = round(latest_rate - prev_rate, 6)
             pct = round((latest_rate / prev_rate - 1.0) * 100, 2) if prev_rate else 0.0
+            return {
+                "pair": pair,
+                "name": mapping[pair]["name"],
+                "symbol": mapping[pair]["symbol"],
+                "price": round(latest_rate, 6),
+                "chg": chg,
+                "pct": pct,
+                "date": date_str,
+            }
 
-            currencies.append(
-                {
-                    "name": info["name"],
-                    "symbol": info["symbol"],
-                    "price": round(latest_rate, 6),
-                    "chg": chg,
-                    "pct": pct,
-                    "date": date_str,
-                    "pair": pair,
-                }
-            )
+        currencies: List[Dict[str, Any]] = [build_row("USDCNY", base_latest, base_prev)]
+
+        for pair, cross_table in [("GBPCNY", "fx_usdgbp"), ("JPYCNY", "fx_usdjpy"), ("EURCNY", "fx_usdeur")]:
+            rows = latest_two(cross_table)
+            if not rows:
+                continue
+            cross_latest = float(rows[0]["close"])
+            cross_prev = float(rows[1]["close"]) if len(rows) > 1 else cross_latest
+            latest_rate = base_latest / cross_latest if cross_latest else 0.0
+            prev_rate = base_prev / cross_prev if cross_prev else latest_rate
+            currencies.append(build_row(pair, latest_rate, prev_rate))
+
+        if not currencies:
+            raise RuntimeError("数据库中未找到任何外汇数据")
+        return {"currencies": currencies}
     finally:
         conn.close()
 
-    if not currencies:
-        raise RuntimeError("数据库中未找到任何外汇数据")
+def _fetch_alpha_vantage_fx_overview() -> Dict[str, Any]:
+    """
+    函数名称：_fetch_alpha_vantage_fx_overview
+    函数功能：使用 Alpha Vantage 外汇日线接口，返回相对人民币的汇率概览：
+        - USD/CNY 直接获取
+        - GBP/CNY 通过交叉汇率 GBP/CNY = (USD/CNY) / (USD/GBP)
+        - JPY/CNY 通过交叉汇率 JPY/CNY = (USD/CNY) / (USD/JPY)
+    返回值：
+        Dict：包含 currencies 列表。
+    """
+    mapping = _fx_table_mapping()
+
+    usdcny_ts = _fetch_alpha_vantage_fx_daily("USD", "CNY")
+    usdgbp_ts = _fetch_alpha_vantage_fx_daily("USD", "GBP")
+    usdjpy_ts = _fetch_alpha_vantage_fx_daily("USD", "JPY")
+
+    if not usdcny_ts:
+        raise RuntimeError("Alpha Vantage 未返回 USD/CNY 数据")
+
+    # 取最近两天（日期字符串可直接排序）
+    def _latest_two(ts: Dict[str, Dict[str, str]]) -> List[Tuple[str, Dict[str, str]]]:
+        items = sorted(ts.items(), key=lambda x: x[0], reverse=True)
+        return items[:2]
+
+    usdcny_two = _latest_two(usdcny_ts)
+    if not usdcny_two:
+        raise RuntimeError("USD/CNY time series 为空")
+
+    def _close(v: Dict[str, str]) -> float:
+        return float(str(v.get("4. close", "0")).replace(",", ""))
+
+    base_latest_date, base_latest_v = usdcny_two[0]
+    base_prev_v = usdcny_two[1][1] if len(usdcny_two) > 1 else base_latest_v
+    base_latest = _close(base_latest_v)
+    base_prev = _close(base_prev_v) if base_prev_v else base_latest
+
+    currencies: List[Dict[str, Any]] = []
+
+    # USD/CNY
+    usd_info = mapping["USDCNY"]
+    usd_chg = round(base_latest - base_prev, 6)
+    usd_pct = round((base_latest / base_prev - 1.0) * 100, 2) if base_prev else 0.0
+    currencies.append(
+        {
+            "pair": "USDCNY",
+            "name": usd_info["name"],
+            "symbol": usd_info["symbol"],
+            "price": round(base_latest, 6),
+            "chg": usd_chg,
+            "pct": usd_pct,
+            "date": base_latest_date,
+        }
+    )
+
+    # GBP/CNY via USD/GBP
+    for pair, cross_ts in [("GBPCNY", usdgbp_ts), ("JPYCNY", usdjpy_ts)]:
+        info = mapping[pair]
+        if not cross_ts:
+            continue
+        cross_two = _latest_two(cross_ts)
+        if not cross_two:
+            continue
+        cross_latest = _close(cross_two[0][1])
+        cross_prev = _close(cross_two[1][1]) if len(cross_two) > 1 else cross_latest
+
+        latest_rate = base_latest / cross_latest if cross_latest else 0.0
+        prev_rate = base_prev / cross_prev if cross_prev else latest_rate
+        chg = round(latest_rate - prev_rate, 6)
+        pct = round((latest_rate / prev_rate - 1.0) * 100, 2) if prev_rate else 0.0
+        currencies.append(
+            {
+                "pair": pair,
+                "name": info["name"],
+                "symbol": info["symbol"],
+                "price": round(latest_rate, 6),
+                "chg": chg,
+                "pct": pct,
+                "date": base_latest_date,
+            }
+        )
 
     return {"currencies": currencies}
 
@@ -1195,11 +1860,14 @@ def api_ts_fx():
         JSON：包含 currencies 列表。
     """
     try:
-        data = _fetch_db_fx_overview()
+        # 先尝试用 Alpha Vantage 更新数据库缓存，再从数据库读取相对人民币的汇率
+        _maybe_refresh_fx_tables_from_alpha_vantage()
+        data = _fetch_db_fx_overview_rmb()
     except Exception as e:
-        logger.warning(f"从数据库读取外汇数据失败，尝试 TuShare: {e}")
+        logger.warning(f"从数据库/Alpha Vantage 获取外汇数据失败，尝试 TuShare: {e}")
         try:
-            data = _fetch_tushare_fx()
+            # TuShare 返回的多为对美元报价，这里仍作为最终兜底（前端主要用人民币口径）
+            data = _build_mock_fx()
         except Exception as e2:
             logger.warning(f"TuShare 外汇获取失败，使用示例数据: {e2}")
             data = _build_mock_fx()
@@ -1220,9 +1888,10 @@ def api_fx_history():
     """
     pair = request.args.get("pair", "USDCNY").upper().replace("/", "")
     try:
-        days = int(request.args.get("days", "30") or 30)
+        # 默认以当天为基准向前 60 天
+        days = int(request.args.get("days", "60") or 60)
     except ValueError:
-        days = 30
+        days = 60
     days = max(1, min(days, 365))
 
     mapping = _fx_table_mapping()
@@ -1232,65 +1901,58 @@ def api_fx_history():
     name = mapping[pair]["name"]
     symbol = mapping[pair]["symbol"]
 
-    conn = get_mysql_connection()
-    cursor = conn.cursor()
-
+    # 优先从数据库缓存读取；若无数据则尝试用 Alpha Vantage 刷新后再读
     start_date = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-    try:
-        if pair == "USDCNY":
-            # 直接从 fx_usdcny 读取
-            sql = "SELECT date, close FROM `fx_usdcny` WHERE date >= %s ORDER BY date ASC"
-            cursor.execute(sql, (start_date,))
-            rows = cursor.fetchall()
-        elif pair in ("GBPCNY", "JPYCNY"):
-            # 通过交叉汇率：X/CNY = (USD/CNY) / (USD/X)，按日期做内连接
-            if pair == "GBPCNY":
-                cross_table = "fx_usdgbp"
-            else:
-                cross_table = "fx_usdjpy"
-
-            sql = f"""
-                SELECT a.date AS date,
-                       a.close AS usdcny_close,
-                       b.close AS cross_close
-                FROM `fx_usdcny` a
-                JOIN `{cross_table}` b ON a.date = b.date
-                WHERE a.date >= %s
-                ORDER BY a.date ASC
-            """
-            cursor.execute(sql, (start_date,))
-            rows = cursor.fetchall()
-        else:
-            rows = []
-    finally:
-        conn.close()
-
-    if not rows:
-        return jsonify({"status": "error", "msg": f"{pair} 在最近 {days} 天内无数据"}), 400
-
-    dates: List[str] = []
-    closes: List[float] = []
+    def _read_series_from_db(table: str) -> List[Dict[str, Any]]:
+        conn = get_mysql_connection()
+        try:
+            cur = conn.cursor()
+            _ensure_fx_daily_table(cur, table)
+            cur.execute(f"SELECT date, close FROM `{table}` WHERE date >= %s ORDER BY date ASC", (start_date,))
+            return cur.fetchall()
+        finally:
+            conn.close()
 
     if pair == "USDCNY":
-        for r in rows:
-            d = r["date"]
-            if isinstance(d, datetime):
-                dates.append(d.strftime("%Y-%m-%d"))
-            else:
-                dates.append(str(d))
-            closes.append(float(r["close"]) if r["close"] is not None else 0.0)
+        rows = _read_series_from_db("fx_usdcny")
+        if not rows:
+            _maybe_refresh_fx_tables_from_alpha_vantage()
+            rows = _read_series_from_db("fx_usdcny")
+        if not rows:
+            return jsonify({"status": "error", "msg": f"{pair} 在最近 {days} 天内无数据"}), 400
+
+        dates = [r["date"].strftime("%Y-%m-%d") if hasattr(r["date"], "strftime") else str(r["date"]) for r in rows]
+        closes = [float(r["close"]) if r.get("close") is not None else 0.0 for r in rows]
+
+    elif pair in ("GBPCNY", "JPYCNY", "EURCNY"):
+        base_rows = _read_series_from_db("fx_usdcny")
+        cross_table = "fx_usdgbp" if pair == "GBPCNY" else ("fx_usdjpy" if pair == "JPYCNY" else "fx_usdeur")
+        cross_rows = _read_series_from_db(cross_table)
+        if not base_rows or not cross_rows:
+            _maybe_refresh_fx_tables_from_alpha_vantage()
+            base_rows = _read_series_from_db("fx_usdcny")
+            cross_rows = _read_series_from_db(cross_table)
+
+        if not base_rows or not cross_rows:
+            return jsonify({"status": "error", "msg": f"{pair} 在最近 {days} 天内无数据"}), 400
+
+        # 日期对齐（按 date 内连接）
+        base_map = { (r["date"].strftime("%Y-%m-%d") if hasattr(r["date"], "strftime") else str(r["date"])): float(r["close"]) for r in base_rows if r.get("close") is not None }
+        cross_map = { (r["date"].strftime("%Y-%m-%d") if hasattr(r["date"], "strftime") else str(r["date"])): float(r["close"]) for r in cross_rows if r.get("close") is not None }
+        common_dates = sorted(set(base_map.keys()) & set(cross_map.keys()))
+        if not common_dates:
+            return jsonify({"status": "error", "msg": f"{pair} 在最近 {days} 天内无对齐数据"}), 400
+
+        dates = common_dates
+        closes = []
+        for d in common_dates:
+            base = base_map[d]
+            cross = cross_map[d]
+            closes.append(base / cross if cross else 0.0)
+
     else:
-        for r in rows:
-            d = r["date"]
-            if isinstance(d, datetime):
-                dates.append(d.strftime("%Y-%m-%d"))
-            else:
-                dates.append(str(d))
-            usdcny_close = float(r["usdcny_close"])
-            cross_close = float(r["cross_close"])
-            rate = usdcny_close / cross_close if cross_close else 0.0
-            closes.append(rate)
+        return jsonify({"status": "error", "msg": f"不支持的货币对: {pair}"}), 400
 
     return jsonify(
         {

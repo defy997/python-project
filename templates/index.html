@@ -67,10 +67,26 @@
       .section-block.active {
         display: block;
       }
+      /* 左上角随机头像 */
+      .corner-avatar {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        border: 2px solid #0d6efd;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        z-index: 9999;
+        object-fit: cover;
+      }
     </style>
   </head>
 
   <body>
+    <!-- 左上角随机头像 -->
+    <img id="cornerAvatar" class="corner-avatar" src="http://api.guiguiya.com/api/img/miyoushe/avatar" alt="avatar" />
+
     <div class="container-fluid py-3">
       <div class="mb-3 text-center">
         <h2 class="page-title">金融数据与文献综合分析系统</h2>
@@ -89,7 +105,7 @@
           <div class="list-group shadow-sm" id="sideNav">
             <a class="list-group-item list-group-item-action" data-target="section-crawler" href="#">爬虫取数</a>
             <a class="list-group-item list-group-item-action" data-target="section-wordcloud" href="#">词云</a>
-            <a class="list-group-item list-group-item-action" data-target="section-sentiment" href="#">评分系统</a>
+            <a class="list-group-item list-group-item-action" data-target="section-sentiment" href="#">金融讯息可视化分析</a>
             <a class="list-group-item list-group-item-action" data-target="section-predict" href="#">股票预测</a>
             <a class="list-group-item list-group-item-action" data-target="section-analysis" href="#">数据分析</a>
           </div>
@@ -151,12 +167,73 @@
           </div>
         </div>
 
-        <!-- 评分系统 -->
+        <!-- 金融讯息可视化分析 -->
         <div class="card shadow-sm mb-3 section-block" id="section-sentiment">
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-2">
-              <div class="section-title mb-0">三、情感/热度/风险评分</div>
-              <small class="text-muted">复用爬虫数据或自定义文本</small>
+              <div class="section-title mb-0">三、金融讯息可视化分析（TuShare 菁融短讯）</div>
+              <small class="text-muted">优先使用菁融短讯接口（jrdc），失败则回退到 news 接口，支持关键词搜索，生成情感分析与词云（后续可扩展更多图表）</small>
+            </div>
+            <div class="row g-2 align-items-end mb-2">
+              <div class="col-md-2">
+                <label class="form-label">开始日期</label>
+                <input id="flashStartDate" type="datetime-local" class="form-control" />
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">结束日期</label>
+                <input id="flashEndDate" type="datetime-local" class="form-control" />
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">数据源（src）</label>
+                <select id="flashSrc" class="form-select">
+                  <option value="sina" selected>新浪财经</option>
+                  <option value="wallstreetcn">华尔街见闻</option>
+                  <option value="10jqka">同花顺</option>
+                  <option value="eastmoney">东方财富</option>
+                  <option value="yuncaijing">云财经</option>
+                  <option value="fenghuang">凤凰新闻</option>
+                  <option value="jinrongjie">金融界</option>
+                  <option value="cls">财联社</option>
+                  <option value="yicai">第一财经</option>
+                </select>
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">关键词搜索</label>
+                <input id="flashKeyword" type="text" class="form-control" placeholder="可选，留空则不过滤" />
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">条数（limit）</label>
+                <input id="flashLimit" type="number" min="10" max="1500" value="80" class="form-control" />
+              </div>
+              <div class="col-md-2">
+                <button class="btn btn-success w-100" id="flashBtn">拉取菁融短讯</button>
+              </div>
+            </div>
+            <div class="row g-2 mb-2">
+              <div class="col-md-12 small text-muted" id="flashStatus"></div>
+            </div>
+            <!-- 短讯原始 JSON 预览（已隐藏） -->
+            <pre class="bg-dark text-light p-2 small" style="max-height:160px;overflow:auto;display:none" id="flashPreview"></pre>
+            <!-- 每条短讯 + 单条情感得分列表 -->
+            <div class="mt-2 small" style="max-height:220px;overflow:auto" id="flashList"></div>
+            <div class="row g-2 mt-2">
+              <div class="col-md-4">
+                <div class="section-title mb-1" style="font-size:0.95rem;">情感分析</div>
+                <div class="sentiment-bar mb-1">
+                  <div id="flashSentPos" class="sentiment-seg sentiment-pos" style="width:33%"></div>
+                  <div id="flashSentNeu" class="sentiment-seg sentiment-neu" style="width:34%"></div>
+                  <div id="flashSentNeg" class="sentiment-seg sentiment-neg" style="width:33%"></div>
+                </div>
+                <div class="small">
+                  <span class="text-success">正向：</span><span id="flashSentPosText">-</span>，
+                  <span class="text-warning">中性：</span><span id="flashSentNeuText">-</span>，
+                  <span class="text-danger">负向：</span><span id="flashSentNegText">-</span>
+                </div>
+              </div>
+              <div class="col-md-8">
+                <div class="section-title mb-1" style="font-size:0.95rem;">词云</div>
+                <div id="flashWordCloud" style="height:260px"></div>
+              </div>
             </div>
             <div class="row g-2">
               <div class="col-md-3">
@@ -493,6 +570,7 @@
       const chartScatter = echarts.init(document.getElementById("chartScatter"));
       const chartBox = echarts.init(document.getElementById("chartBox"));
       const wordChart = echarts.init(document.getElementById("wordCloud"));
+      const flashWordChart = echarts.init(document.getElementById("flashWordCloud"));
       const predictChart = echarts.init(
         document.getElementById("predictChart")
       );
@@ -530,12 +608,19 @@
           predictLoaded = true;
         }
 
-        // 切换到外汇所在分页后，强制 resize，避免图表容器初始宽高为 0
+        // 切换到股票预测分页后，强制 resize 所有图表，避免图表容器初始宽高为 0
         if (id === "section-predict") {
           setTimeout(() => {
+            if (predictChart) predictChart.resize();
             const c = getFxChart();
             if (c) c.resize();
-          }, 0);
+            // 股票区间图表
+            const stockDom = document.getElementById("stockChart");
+            if (stockDom) {
+              const stockInst = echarts.getInstanceByDom(stockDom);
+              if (stockInst) stockInst.resize();
+            }
+          }, 50);
         }
       }
 
@@ -549,6 +634,16 @@
       // 默认显示第一个分页
       if (sideLinks.length > 0) {
         showSection(sideLinks[0].dataset.target);
+      }
+
+      // 简单 HTML 转义，避免标题中出现标签时影响页面
+      function htmlEscape(str) {
+        return String(str || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
       }
 
       // 设置空白初始配置
@@ -573,6 +668,35 @@
         document.getElementById("sentPosText").innerText = p + "%";
         document.getElementById("sentNeuText").innerText = n + "%";
         document.getElementById("sentNegText").innerText = g + "%";
+      }
+
+      /**
+       * 菁融短讯：渲染“每条短讯 + 单条情感得分”列表
+       */
+      function renderFlashList(items) {
+        const box = document.getElementById("flashList");
+        if (!box) return;
+        box.innerHTML = "";
+        (items || []).forEach((it, idx) => {
+          const s = it.sentiment || {};
+          const p = Math.round((s.positive || 0) * 100);
+          const n = Math.round((s.neutral || 0) * 100);
+          const g = Math.round((s.negative || 0) * 100);
+          const t = it.pub_time || it.datetime || "";
+          const title = it.title || "(无标题)";
+          const src = it.src || "";
+          const div = document.createElement("div");
+          div.className = "mb-1";
+          div.innerHTML =
+            `<span class="text-muted">${idx + 1}.</span> ` +
+            (t ? `[${htmlEscape(t)}] ` : "") +
+            `<span class="text-primary">${htmlEscape(title)}</span>` +
+            (src ? ` <span class="text-muted">(${htmlEscape(src)})</span>` : "") +
+            ` <span class="ms-1 text-success">正向 ${p}%</span>` +
+            ` <span class="ms-1 text-warning">中性 ${n}%</span>` +
+            ` <span class="ms-1 text-danger">负向 ${g}%</span>`;
+          box.appendChild(div);
+        });
       }
 
       /**
@@ -689,6 +813,41 @@
             },
           ],
         });
+      }
+
+      function renderFlashWordCloud(words) {
+        flashWordChart.setOption({
+          tooltip: {},
+          series: [
+            {
+              type: "wordCloud",
+              shape: "circle",
+              gridSize: 6,
+              sizeRange: [10, 44],
+              rotationRange: [-30, 30],
+              textStyle: {
+                color: function () {
+                  const colors = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de", "#3ba272"];
+                  return colors[Math.floor(Math.random() * colors.length)];
+                },
+              },
+              data: words,
+            },
+          ],
+        });
+      }
+
+      function updateFlashSentimentBar(sentiment) {
+        const s = sentiment || {};
+        const p = Math.max(0, Math.min(1, s.positive ?? 0.33));
+        const n = Math.max(0, Math.min(1, s.neutral ?? 0.34));
+        const g = Math.max(0, Math.min(1, s.negative ?? 0.33));
+        document.getElementById("flashSentPos").style.width = `${Math.round(p * 100)}%`;
+        document.getElementById("flashSentNeu").style.width = `${Math.round(n * 100)}%`;
+        document.getElementById("flashSentNeg").style.width = `${Math.round(g * 100)}%`;
+        document.getElementById("flashSentPosText").innerText = `${Math.round(p * 100)}%`;
+        document.getElementById("flashSentNeuText").innerText = `${Math.round(n * 100)}%`;
+        document.getElementById("flashSentNegText").innerText = `${Math.round(g * 100)}%`;
       }
 
       /**
@@ -974,6 +1133,84 @@
           })
           .catch((e) => {
             document.getElementById("sentSource").innerText = "请求失败：" + e;
+          });
+      });
+
+      // 金融讯息可视化分析：TuShare 菁融短讯
+      // 设置默认日期（今天）
+      (function() {
+        const today = new Date();
+        const todayStr = today.toISOString().slice(0, 16);
+        const startDateEl = document.getElementById("flashStartDate");
+        const endDateEl = document.getElementById("flashEndDate");
+        if (startDateEl && !startDateEl.value) {
+          startDateEl.value = todayStr;
+        }
+        if (endDateEl && !endDateEl.value) {
+          endDateEl.value = todayStr;
+        }
+      })();
+
+      document.getElementById("flashBtn").addEventListener("click", function () {
+        const btn = this;
+        const original = btn.textContent;
+        
+        // 读取所有参数
+        const startDateInput = document.getElementById("flashStartDate").value;
+        const endDateInput = document.getElementById("flashEndDate").value;
+        const src = document.getElementById("flashSrc").value || "sina";
+        const keyword = document.getElementById("flashKeyword").value.trim();
+        const limit = Number(document.getElementById("flashLimit").value || 80);
+        
+        // 转换日期格式：datetime-local (YYYY-MM-DDTHH:mm) -> TuShare 格式 (YYYY-MM-DD HH:mm:ss)
+        let startDate = startDateInput ? startDateInput.replace("T", " ") + ":00" : "";
+        let endDate = endDateInput ? endDateInput.replace("T", " ") + ":59" : "";
+        
+        btn.disabled = true;
+        btn.textContent = "拉取中...";
+        document.getElementById("flashStatus").innerText = `正在从 TuShare 拉取菁融短讯（优先 jrdc 接口，失败则用 news 接口）并生成词云/情感分析...`;
+
+        // 构建查询参数
+        const params = new URLSearchParams();
+        if (startDate) params.append("start_date", startDate);
+        if (endDate) params.append("end_date", endDate);
+        params.append("src", src);
+        params.append("limit", limit.toString());
+        if (keyword) params.append("keyword", keyword);
+
+        fetch(`/api/ts_flash_viz?${params.toString()}`)
+          .then((r) => {
+            if (!r.ok) {
+              return r.json().then((d) => {
+                throw new Error(d.msg || `HTTP ${r.status}`);
+              });
+            }
+            return r.json();
+          })
+          .then((d) => {
+            if (d.status === "error") {
+              throw new Error(d.msg || "拉取失败");
+            }
+            document.getElementById("flashPreview").textContent = JSON.stringify(
+              (d.items || []).slice(0, 30),
+              null,
+              2
+            );
+            // 列表展示：每条短讯 + 单条情感得分
+            renderFlashList(d.items || []);
+            updateFlashSentimentBar(d.sentiment || {});
+            renderFlashWordCloud(d.words || []);
+            document.getElementById("flashStatus").innerText = `完成：共 ${d.rows || 0} 条菁融短讯${keyword ? `（关键词: ${keyword}）` : ""}`;
+            // 确保词云在可见尺寸下渲染
+            setTimeout(() => flashWordChart.resize(), 0);
+          })
+          .catch((e) => {
+            document.getElementById("flashStatus").innerText = "失败：" + e.message;
+            alert("菁融短讯拉取失败：" + e.message);
+          })
+          .finally(() => {
+            btn.disabled = false;
+            btn.textContent = original;
           });
       });
 
