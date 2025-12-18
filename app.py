@@ -256,6 +256,46 @@ def _save_tushare_stock_daily_to_mysql(df_daily: pd.DataFrame) -> int:
         conn.close()
 
 
+def _load_price_series_from_mysql(
+    table: str,
+    code_col: str,
+    code: str,
+    min_rows: int = 30,
+) -> List[Dict[str, Any]]:
+    """
+    从指定 MySQL 表中加载某个代码的历史收盘价序列。
+    要求表结构中至少包含：code_col、trade_date、close。
+    返回按 trade_date 升序的列表：[{"date": date, "close": float}, ...]
+    若数据量不足 min_rows，则返回空列表。
+    """
+    conn = get_mysql_connection()
+    try:
+        cur = conn.cursor()
+        sql = f"SELECT trade_date AS date, close FROM `{table}` WHERE {code_col}=%s ORDER BY trade_date ASC"
+        cur.execute(sql, (code,))
+        rows = cur.fetchall()
+        if not rows or len(rows) < min_rows:
+            return []
+        series: List[Dict[str, Any]] = []
+        for r in rows:
+            d = r.get("date")
+            v = r.get("close")
+            if v is None:
+                continue
+            if hasattr(d, "strftime"):
+                d_str = d.strftime("%Y-%m-%d")
+            else:
+                d_str = str(d)
+            try:
+                v_f = float(v)
+            except Exception:
+                continue
+            series.append({"date": d_str, "close": v_f})
+        return series
+    finally:
+        conn.close()
+
+
 def _ensure_ts_flash_table(cursor) -> None:
     """确保 TuShare 短讯表存在（按 id 唯一）。"""
     cursor.execute(
@@ -836,17 +876,6 @@ def index() -> str:
         str：渲染后的 HTML 页面字符串。
     """
     return render_template("index.html")  # 渲染首页模板
-
-
-@app.route("/crawler_ml", methods=["GET"])
-def crawler_ml_index() -> str:
-    """
-    函数名称：crawler_ml_index
-    函数功能：返回“爬虫 + MySQL + 机器学习”实验的前端界面。
-    返回值：
-        str：渲染后的 HTML 字符串。
-    """
-    return render_template("crawler_ml.html")
 
 
 def _build_df_from_request() -> pd.DataFrame:
@@ -1763,6 +1792,75 @@ def _fetch_db_fx_overview_rmb() -> Dict[str, Any]:
     finally:
         conn.close()
 
+
+def _list_ml_candidate_tables() -> List[Dict[str, Any]]:
+    """
+    函数名称：_list_ml_candidate_tables
+    函数功能：列出可用于 ML 预测的 MySQL 表（过滤掉明显与价格无关的表，如新闻表）。
+    规则示例：
+        - 优先保留外汇相关表：fx_ 前缀；
+        - 过滤包含 news / flash / log 等关键字的表；
+    返回值：
+        List[Dict]：[{name: 表名, label: 友好名称}, ...]
+    """
+    conn = get_mysql_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SHOW TABLES")
+        rows = cur.fetchall()
+        tables: List[Dict[str, Any]] = []
+        # pymysql DictCursor 下的 key 一般形如: {'Tables_in_xxx': 'table_name'}
+        db_key = None
+        if rows:
+            db_key = next(iter(rows[0].keys()))
+        for r in rows:
+            name = r.get(db_key) if db_key else None
+            if not name:
+                continue
+            t = str(name)
+            low = t.lower()
+            # 过滤掉明显与 ML 无关的表
+            if any(k in low for k in ["news", "flash", "log", "tmp", "demo"]):
+                continue
+            # 目前主要推荐外汇相关表：fx_ 前缀
+            if not (low.startswith("fx_") or low.startswith("ts_") or low.endswith("_daily")):
+                continue
+            label = t
+            # 为常见外汇表增加友好说明
+            friendly = {
+                "fx_usdcny": "fx_usdcny（美元/人民币日线）",
+                "fx_usdgbp": "fx_usdgbp（美元/英镑日线）",
+                "fx_usdjpy": "fx_usdjpy（美元/日元日线）",
+                "fx_usdeur": "fx_usdeur（美元/欧元日线）",
+            }
+            if t in friendly:
+                label = friendly[t]
+            tables.append({"name": t, "label": label})
+        return tables
+    finally:
+        conn.close()
+
+
+def _list_table_columns(table_name: str) -> List[str]:
+    """
+    列出指定表的列名，按原始顺序返回。
+    """
+    conn = get_mysql_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SHOW COLUMNS FROM `{table_name}`")
+        rows = cur.fetchall()
+        cols: List[str] = []
+        for r in rows:
+            # pymysql DictCursor 下 key 通常为 'Field'
+            name = r.get("Field") or next(iter(r.values()), None)
+            if not name:
+                continue
+            cols.append(str(name))
+        return cols
+    finally:
+        conn.close()
+
 def _fetch_alpha_vantage_fx_overview() -> Dict[str, Any]:
     """
     函数名称：_fetch_alpha_vantage_fx_overview
@@ -1872,6 +1970,112 @@ def api_ts_fx():
             logger.warning(f"TuShare 外汇获取失败，使用示例数据: {e2}")
             data = _build_mock_fx()
     return jsonify({"status": "ok", **data})
+
+
+@app.route("/api/ts_index_predict", methods=["POST"])
+@handle_api_errors
+def api_ts_index_predict():
+    """
+    函数名称：api_ts_index_predict
+    函数功能：对单个指数（ts_code）进行简单预测：
+        1. 优先从 MySQL ts_index_daily 表读取历史收盘价；
+        2. 若数据不足，则自动调用 TuShare index_daily 爬取并保存；
+        3. 使用一阶线性拟合，对未来 horizon 个交易日做外推预测。
+    前端参数：
+        ts_code：指数代码（如 000300.SH）；
+        horizon：预测步数（3~60，默认 8）。
+    返回值：
+        JSON：{history: [...], forecast: [...]}，均为 [{date, value}] 列表。
+    """
+    if ts is None:
+        return jsonify({"status": "error", "msg": "当前环境未安装 tushare 库"}), 500
+    if not TUSHARE_TOKEN:
+        return jsonify({"status": "error", "msg": "未配置 TuShare Token"}), 500
+
+    ts_code = request.form.get("ts_code", "").strip()
+    if not ts_code:
+        return jsonify({"status": "error", "msg": "ts_code 不能为空"}), 400
+    try:
+        horizon = int(request.form.get("horizon", "8") or 8)
+    except ValueError:
+        horizon = 8
+    horizon = max(3, min(horizon, 60))
+
+    # 1) 尝试从 MySQL 读取
+    series = _load_price_series_from_mysql("ts_index_daily", "ts_code", ts_code, min_rows=20)
+
+    # 2) 若数据不足，则调用 TuShare 爬取近一年数据并写入，再次读取
+    if not series:
+        pro = ts.pro_api(TUSHARE_TOKEN)
+        end_date = datetime.today()
+        start_date = end_date - timedelta(days=365)
+        end_str = end_date.strftime("%Y%m%d")
+        start_str = start_date.strftime("%Y%m%d")
+        df_idx = pd.DataFrame()
+        try:
+            df_idx = pro.index_daily(ts_code=ts_code, start_date=start_str, end_date=end_str)
+        except Exception as e:
+            logger.error(f"TuShare 拉取指数 {ts_code} 预测数据失败: {e}")
+        if not df_idx.empty:
+            try:
+                saved = _save_tushare_index_daily_to_mysql(df_idx, ts_code)
+                logger.info(f"指数 {ts_code} 预测前已写入 ts_index_daily，记录数: {saved}")
+            except Exception as e:
+                logger.warning(f"指数 {ts_code} 写入 ts_index_daily 失败: {e}")
+            series = _load_price_series_from_mysql("ts_index_daily", "ts_code", ts_code, min_rows=20)
+
+    if not series:
+        return jsonify({"status": "error", "msg": f"指数 {ts_code} 在数据库和 TuShare 中均无足够数据"}), 400
+
+    y = np.array([s["close"] for s in series], dtype=float)
+    x = np.arange(len(y))
+    if len(y) < 5:
+        return jsonify({"status": "error", "msg": "数据量过少，无法预测"}), 400
+
+    coef = np.polyfit(x, y, deg=1)
+    poly = np.poly1d(coef)
+    future_x = np.arange(len(y), len(y) + horizon)
+    future_y = poly(future_x)
+
+    history = [{"date": series[i]["date"], "value": float(v)} for i, v in enumerate(y.tolist())]
+    last_date = datetime.strptime(series[-1]["date"], "%Y-%m-%d")
+    forecast = []
+    for i, v in enumerate(future_y.tolist(), start=1):
+        d = last_date + timedelta(days=i)
+        forecast.append({"date": d.strftime("%Y-%m-%d"), "value": float(v)})
+
+    return jsonify(
+        {
+            "status": "ok",
+            "ts_code": ts_code,
+            "horizon": horizon,
+            "history": history,
+            "forecast": forecast,
+        }
+    )
+
+
+@app.route("/api/ml_schema", methods=["GET"])
+@handle_api_errors
+def api_ml_schema():
+    """
+    函数名称：api_ml_schema
+    函数功能：为前端 ML 预测模块提供可选表与列信息。
+    规则：
+        - 仅返回经过 _list_ml_candidate_tables 过滤后的表（例如 fx_ 系列外汇表）；
+        - 每个表附带列名列表，供前端构造下拉框选择。
+    返回值：
+        JSON：{tables: [{name, label, columns: [...]}, ...]}
+    """
+    tables = _list_ml_candidate_tables()
+    for t in tables:
+        name = t.get("name")
+        try:
+            t["columns"] = _list_table_columns(name)
+        except Exception as e:
+            logger.warning(f"获取表 {name} 列信息失败: {e}")
+            t["columns"] = []
+    return jsonify({"status": "ok", "tables": tables})
 
 
 @app.route("/api/fx_history", methods=["GET"])
@@ -2042,6 +2246,89 @@ def api_ts_stock_range():
     )
 
 
+@app.route("/api/ts_stock_predict", methods=["POST"])
+@handle_api_errors
+def api_ts_stock_predict():
+    """
+    函数名称：api_ts_stock_predict
+    函数功能：对单只股票（ts_code）进行简单预测：
+        1. 优先从 MySQL ts_stock_daily 表读取历史收盘价；
+        2. 若数据不足，则自动调用 TuShare daily 爬取并保存；
+        3. 使用一阶线性拟合，对未来 horizon 个交易日做外推预测。
+    前端参数：
+        ts_code：股票代码（如 600519.SH）；
+        horizon：预测步数（3~60，默认 8）。
+    返回值：
+        JSON：{history: [...], forecast: [...]}，均为 [{date, value}] 列表。
+    """
+    if ts is None:
+        return jsonify({"status": "error", "msg": "当前环境未安装 tushare 库"}), 500
+    if not TUSHARE_TOKEN:
+        return jsonify({"status": "error", "msg": "未配置 TuShare Token"}), 500
+
+    ts_code = request.form.get("ts_code", "").strip()
+    if not ts_code:
+        return jsonify({"status": "error", "msg": "ts_code 不能为空"}), 400
+    try:
+        horizon = int(request.form.get("horizon", "8") or 8)
+    except ValueError:
+        horizon = 8
+    horizon = max(3, min(horizon, 60))
+
+    # 1) 尝试从 MySQL 读取
+    series = _load_price_series_from_mysql("ts_stock_daily", "ts_code", ts_code, min_rows=20)
+
+    # 2) 若数据不足，则调用 TuShare daily 爬取近一年数据并写入，再次读取
+    if not series:
+        pro = ts.pro_api(TUSHARE_TOKEN)
+        end_date = datetime.today()
+        start_date = end_date - timedelta(days=365)
+        end_str = end_date.strftime("%Y%m%d")
+        start_str = start_date.strftime("%Y%m%d")
+        df = pd.DataFrame()
+        try:
+            df = pro.daily(ts_code=ts_code, start_date=start_str, end_date=end_str)
+        except Exception as e:
+            logger.error(f"TuShare 拉取股票 {ts_code} 预测数据失败: {e}")
+        if not df.empty:
+            try:
+                saved = _save_tushare_stock_daily_to_mysql(df)
+                logger.info(f"股票 {ts_code} 预测前已写入 ts_stock_daily，记录数: {saved}")
+            except Exception as e:
+                logger.warning(f"股票 {ts_code} 写入 ts_stock_daily 失败: {e}")
+            series = _load_price_series_from_mysql("ts_stock_daily", "ts_code", ts_code, min_rows=20)
+
+    if not series:
+        return jsonify({"status": "error", "msg": f"股票 {ts_code} 在数据库和 TuShare 中均无足够数据"}), 400
+
+    y = np.array([s["close"] for s in series], dtype=float)
+    x = np.arange(len(y))
+    if len(y) < 5:
+        return jsonify({"status": "error", "msg": "数据量过少，无法预测"}), 400
+
+    coef = np.polyfit(x, y, deg=1)
+    poly = np.poly1d(coef)
+    future_x = np.arange(len(y), len(y) + horizon)
+    future_y = poly(future_x)
+
+    history = [{"date": series[i]["date"], "value": float(v)} for i, v in enumerate(y.tolist())]
+    last_date = datetime.strptime(series[-1]["date"], "%Y-%m-%d")
+    forecast = []
+    for i, v in enumerate(future_y.tolist(), start=1):
+        d = last_date + timedelta(days=i)
+        forecast.append({"date": d.strftime("%Y-%m-%d"), "value": float(v)})
+
+    return jsonify(
+        {
+            "status": "ok",
+            "ts_code": ts_code,
+            "horizon": horizon,
+            "history": history,
+            "forecast": forecast,
+        }
+    )
+
+
 @app.route("/api/run_ml", methods=["POST"])
 @handle_api_errors
 def api_run_ml():
@@ -2058,6 +2345,12 @@ def api_run_ml():
     table_name = request.form.get("table_name", "financial_series").strip() or "financial_series"
     feature_cols_str = request.form.get("feature_cols", "").strip()
     target_col = request.form.get("target_col", "").strip()
+    # 可选：预测步数，用于简单时间序列外推（默认 0，不做预测）
+    try:
+        horizon = int(request.form.get("horizon", "0") or 0)
+    except ValueError:
+        horizon = 0
+    horizon = max(0, min(horizon, 60))
 
     if not feature_cols_str:
         return jsonify({"status": "error", "msg": "feature_cols 不能为空"}), 400
@@ -2080,6 +2373,7 @@ def api_run_ml():
         return jsonify({"status": "error", "msg": validation["msg"]}), 400
 
     results: Dict[str, Dict] = {}
+    ts_forecast: Dict[str, Any] | None = None
 
     # 1. 回归
     if target_col and target_col in df.columns:
@@ -2105,6 +2399,25 @@ def api_run_ml():
         except Exception as e:
             logger.error(f"分类模型失败: {e}")
             results["classification"] = {"error": str(e)}
+        # 若指定了预测步数，则基于目标列做简单时间序列线性外推
+        if horizon > 0:
+            try:
+                y_series = df[target_col].astype(float).values
+                x = np.arange(len(y_series))
+                if len(y_series) >= 5:
+                    coef = np.polyfit(x, y_series, deg=1)
+                    poly = np.poly1d(coef)
+                    future_x = np.arange(len(y_series), len(y_series) + horizon)
+                    future_y = poly(future_x)
+                    ts_forecast = {
+                        "target_col": target_col,
+                        "history": [{"x": int(i), "y": float(v)} for i, v in zip(x.tolist(), y_series.tolist())],
+                        "forecast": [{"x": int(i), "y": float(v)} for i, v in zip(future_x.tolist(), future_y.tolist())],
+                    }
+                    logger.info(f"时间序列外推完成，步数: {horizon}")
+            except Exception as e:
+                logger.warning(f"时间序列外推失败（target_col={target_col}）: {e}")
+
     else:
         logger.warning(f"目标列 {target_col} 不存在，跳过回归和分类")
 
@@ -2120,15 +2433,17 @@ def api_run_ml():
         logger.error(f"聚类模型失败: {e}")
         results["clustering"] = {"error": str(e)}
 
-    return jsonify(
-        {
-            "status": "ok",
-            "table": table_name,
-            "feature_cols": feature_cols,
-            "target_col": target_col,
-            "models": results,
-        }
-    )
+    payload: Dict[str, Any] = {
+        "status": "ok",
+        "table": table_name,
+        "feature_cols": feature_cols,
+        "target_col": target_col,
+        "models": results,
+    }
+    if ts_forecast is not None:
+        payload["ts_forecast"] = ts_forecast
+
+    return jsonify(payload)
 
 
 if __name__ == "__main__":

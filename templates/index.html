@@ -93,10 +93,7 @@
         <p class="text-muted small mb-1">
           通过前后端交互，对金融数据进行多维度可视化分析，并借助“AI 模型”进行文献摘要与情感分析。
         </p>
-        <p class="text-muted small">
-          如需进行“爬虫 + MySQL + 机器学习”实验，请点击
-          <a href="/crawler_ml" class="link-primary">这里进入综合爬虫页面</a>（同一后端程序）。
-        </p>
+        <!-- 原 crawler_ml 独立页面已下线，这里去掉跳转提示 -->
       </div>
 
       <!-- 布局：左侧侧边栏 + 右侧分页内容 -->
@@ -363,6 +360,133 @@
                 <div id="stockChart" style="height:260px" class="mt-2"></div>
               </div>
             </div>
+
+            <!-- 统一预测面板：指数 / 股票 / 通用 ML -->
+            <div class="card mt-3">
+              <div class="card-body p-2">
+                <div class="section-title mb-2" style="font-size:0.95rem;">机器学习与时间序列预测</div>
+
+                <!-- 预测类型切换 -->
+                <div class="mb-2">
+                  <label class="form-label me-2">预测类型：</label>
+                  <div class="btn-group btn-group-sm" role="group">
+                    <input type="radio" class="btn-check" name="mlMode" id="mlModeIndex" value="index" autocomplete="off" checked>
+                    <label class="btn btn-outline-primary" for="mlModeIndex">指数预测</label>
+                    <input type="radio" class="btn-check" name="mlMode" id="mlModeStock" value="stock" autocomplete="off">
+                    <label class="btn btn-outline-primary" for="mlModeStock">股票预测</label>
+                    <input type="radio" class="btn-check" name="mlMode" id="mlModeGeneric" value="generic" autocomplete="off">
+                    <label class="btn btn-outline-primary" for="mlModeGeneric">通用 ML</label>
+                  </div>
+                </div>
+
+                <!-- 指数预测表单 -->
+                <div id="mlPanelIndex" class="mb-2">
+                  <div class="row g-2 align-items-end">
+                    <div class="col-md-4">
+                      <label class="form-label">选择指数</label>
+                      <select id="indexPredCode" class="form-select">
+                        <option value="000001.SH">上证指数 (000001.SH)</option>
+                        <option value="399001.SZ">深证成指 (399001.SZ)</option>
+                        <option value="399006.SZ">创业板指 (399006.SZ)</option>
+                        <option value="000300.SH">沪深300 (000300.SH)</option>
+                        <option value="000905.SH">中证500 (000905.SH)</option>
+                      </select>
+                    </div>
+                    <div class="col-md-2">
+                      <label class="form-label">预测步数</label>
+                      <input id="indexPredHorizon" type="number" min="3" max="60" value="8" class="form-control" />
+                    </div>
+                    <div class="col-md-2">
+                      <button class="btn btn-outline-info w-100" id="indexPredBtn">生成指数预测</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 股票预测表单 -->
+                <div id="mlPanelStock" class="mb-2" style="display:none;">
+                  <div class="row g-2 align-items-end">
+                    <div class="col-md-4">
+                      <label class="form-label">股票代码（ts_code）</label>
+                      <input id="stockPredCode" class="form-control" placeholder="如：600519.SH" />
+                    </div>
+                    <div class="col-md-2">
+                      <label class="form-label">预测步数</label>
+                      <input id="stockPredHorizon" type="number" min="3" max="60" value="8" class="form-control" />
+                    </div>
+                    <div class="col-md-2">
+                      <button class="btn btn-outline-success w-100" id="stockPredBtn">生成股票预测</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 通用 ML 表单 -->
+                <div id="mlPanelGeneric" class="mb-2" style="display:none;">
+                  <div class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                      <label class="form-label">选择表（仅展示可用于预测的表）</label>
+                      <select id="mlTable" class="form-select"></select>
+                    </div>
+                    <div class="col-md-5">
+                      <label class="form-label">特征列（可多选，按 Ctrl/Shift 选择）</label>
+                      <select id="mlFeatures" class="form-select" multiple size="4"></select>
+                    </div>
+                    <div class="col-md-2">
+                      <label class="form-label">目标列（可选）</label>
+                      <select id="mlTarget" class="form-select"></select>
+                    </div>
+                    <div class="col-md-2">
+                      <label class="form-label">预测步数</label>
+                      <input id="mlHorizon" type="number" min="0" max="60" value="0" class="form-control" />
+                    </div>
+                    <div class="col-md-2 mt-2">
+                      <button class="btn btn-outline-primary w-100" id="mlBtn">运行 ML 模型</button>
+                    </div>
+                  </div>
+                  <div class="small text-muted mt-1">
+                    说明：仅展示外汇等可用于时间序列/价格预测的表；若目标列为空，则只运行聚类；若指定目标列且存在，则同时运行回归与分类。
+                  </div>
+                  <pre id="mlResult" class="bg-dark text-light p-2 small mt-2" style="max-height:180px;overflow:auto;"></pre>
+                </div>
+
+                <!-- 通用 ML 指标图表（仅通用 ML 模式下使用） -->
+                <div id="mlGenericCharts">
+                  <div class="row g-2 mt-2">
+                    <div class="col-md-4">
+                      <div class="card">
+                        <div class="card-body p-2">
+                          <div class="section-title mb-1" style="font-size:0.95rem;">回归指标</div>
+                          <div id="mlChartReg" style="height:220px;"></div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="col-md-4">
+                      <div class="card">
+                        <div class="card-body p-2">
+                          <div class="section-title mb-1" style="font-size:0.95rem;">分类指标</div>
+                          <div id="mlChartCls" style="height:220px;"></div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="col-md-4">
+                      <div class="card">
+                        <div class="card-body p-2">
+                          <div class="section-title mb-1" style="font-size:0.95rem;">聚类指标</div>
+                          <div id="mlChartClu" style="height:220px;"></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 统一时间序列 / 指数 / 股票预测曲线 -->
+                <div class="card mt-2">
+                  <div class="card-body p-2">
+                    <div class="section-title mb-1" style="font-size:0.95rem;">时间序列与预测</div>
+                    <div id="mlTsChart" style="height:260px;"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -571,9 +695,7 @@
       const chartBox = echarts.init(document.getElementById("chartBox"));
       const wordChart = echarts.init(document.getElementById("wordCloud"));
       const flashWordChart = echarts.init(document.getElementById("flashWordCloud"));
-      const predictChart = echarts.init(
-        document.getElementById("predictChart")
-      );
+      const predictChart = echarts.init(document.getElementById("predictChart"));
 
       // 外汇折线图：页面初始时可能处于隐藏分页，直接 init 会导致 0 宽高渲染失败
       function getFxChart() {
@@ -597,13 +719,16 @@
           link.classList.toggle("active", link.dataset.target === id);
         });
 
-        // 首次切换到“股票预测”分页时自动获取指数与货币数据
+        // 首次切换到“股票预测”分页时自动获取指数与货币数据 + 加载 ML 表结构
         if (id === "section-predict" && !predictLoaded) {
           if (typeof loadTsMarket === "function") {
             loadTsMarket();
           }
           if (typeof loadFx === "function") {
             loadFx();
+          }
+          if (typeof loadMlSchema === "function") {
+            loadMlSchema();
           }
           predictLoaded = true;
         }
@@ -646,6 +771,107 @@
           .replace(/'/g, "&#39;");
       }
 
+      // 渲染 ML 指标条形图
+      function renderMlMetrics(domId, metrics, title = "") {
+        const dom = document.getElementById(domId);
+        if (!dom) return;
+        let chart = echarts.getInstanceByDom(dom);
+        if (!chart) chart = echarts.init(dom);
+
+        const entries = Object.entries(metrics || {}).filter(
+          ([, v]) => typeof v === "number" && isFinite(v)
+        );
+
+        if (entries.length === 0) {
+          chart.setOption({
+            title: { text: title || "无可用指标", left: "center", textStyle: { fontSize: 12 } },
+            xAxis: { show: false }, yAxis: { show: false }, series: [],
+          });
+          return;
+        }
+
+        const names = entries.map(([k]) => k);
+        const values = entries.map(([, v]) => v);
+
+        chart.setOption({
+          title: { text: title, left: "center", textStyle: { fontSize: 12 } },
+          tooltip: { trigger: "axis" },
+          grid: { left: 60, right: 20, top: 30, bottom: 20 },
+          xAxis: { type: "value" },
+          yAxis: { type: "category", data: names },
+          series: [
+            { type: "bar", data: values, itemStyle: { color: "#0d6efd" } },
+          ],
+        });
+      }
+
+      // 渲染 ML 时间序列预测
+      function renderMlForecast(ts) {
+        const dom = document.getElementById("mlTsChart");
+        if (!dom) return;
+        let chart = echarts.getInstanceByDom(dom);
+        if (!chart) chart = echarts.init(dom);
+
+        if (!ts || !Array.isArray(ts.history) || ts.history.length === 0) {
+          chart.setOption({
+            title: { text: "暂无时间序列数据", left: "center", textStyle: { fontSize: 12 } },
+            xAxis: { show: false }, yAxis: { show: false }, series: [],
+          });
+          return;
+        }
+
+        const fullHist = ts.history || [];
+        const fut = ts.forecast || [];
+
+        // 为了保证右侧的“预测部分”始终清晰可见，如果点太多，只展示
+        // “最近一段历史 + 全部预测”，从右往左回看。
+        const MAX_POINTS = 80; // 视图中最多展示的总点数（历史 + 预测）
+        let hist = fullHist;
+        if (fullHist.length + fut.length > MAX_POINTS) {
+          const keepHist = Math.max(10, MAX_POINTS - fut.length); // 至少保留一些历史
+          hist = fullHist.slice(-keepHist);
+        }
+
+        // 横坐标优先使用日期（date），否则退回到 x 或索引
+        const histLabels = hist.map((p, idx) => p.date ?? p.x ?? idx);
+        const futLabels = fut.map(
+          (p, idx) => p.date ?? `t+${idx + 1}`
+        );
+
+        const xs = histLabels.concat(futLabels);
+        const ysHist = hist.map((p) => p.y);
+        const ysFut = new Array(histLabels.length)
+          .fill(null)
+          .concat(fut.map((p) => p.y));
+
+        chart.setOption({
+          title: {
+            text: `目标列 ${ts.target_col || ""} 的历史与预测`,
+            left: "center",
+            textStyle: { fontSize: 12 },
+          },
+          tooltip: { trigger: "axis" },
+          legend: { top: 20, data: ["历史", "预测"] },
+          grid: { left: 60, right: 20, top: 50, bottom: 30 },
+          xAxis: { type: "category", data: xs, name: "时间" },
+          yAxis: { type: "value", name: "数值" },
+          series: [
+            {
+              name: "历史",
+              type: "line",
+              smooth: true,
+              data: ysHist,
+            },
+            {
+              name: "预测",
+              type: "line",
+              smooth: true,
+              data: ysFut,
+            },
+          ],
+        });
+      }
+
       // 设置空白初始配置
       chartLine.setOption({ title: { text: "等待数据...", left: "center" } });
       chartBar.setOption({ title: { text: "等待数据...", left: "center" } });
@@ -654,6 +880,59 @@
       chartBox.setOption({ title: { text: "等待数据...", left: "center" } });
       wordChart.setOption({ title: { text: "等待数据...", left: "center" } });
       predictChart.setOption({ title: { text: "等待数据...", left: "center" } });
+
+      // 加载 ML 可选表与列
+      function loadMlSchema() {
+        fetch("/api/ml_schema")
+          .then((r) => r.json())
+          .then((d) => {
+            if (d.status === "error") throw new Error(d.msg || "加载失败");
+            const tables = d.tables || [];
+            const tableSel = document.getElementById("mlTable");
+            const featSel = document.getElementById("mlFeatures");
+            const targetSel = document.getElementById("mlTarget");
+            if (!tableSel || !featSel || !targetSel) return;
+
+            tableSel.innerHTML = "";
+            tables.forEach((t, idx) => {
+              const opt = document.createElement("option");
+              opt.value = t.name;
+              opt.textContent = t.label || t.name;
+              if (idx === 0) opt.selected = true;
+              tableSel.appendChild(opt);
+            });
+
+            function updateCols() {
+              const current = tableSel.value;
+              const info = tables.find((t) => t.name === current);
+              const cols = (info && info.columns) || [];
+              featSel.innerHTML = "";
+              targetSel.innerHTML = "";
+              cols.forEach((c) => {
+                const opt1 = document.createElement("option");
+                opt1.value = c;
+                opt1.textContent = c;
+                featSel.appendChild(opt1);
+
+                const opt2 = document.createElement("option");
+                opt2.value = c;
+                opt2.textContent = c;
+                targetSel.appendChild(opt2);
+              });
+              // 默认：特征列全部不选，由用户手动选择；目标列默认选最后一列
+              if (targetSel.options.length > 0) {
+                targetSel.options[targetSel.options.length - 1].selected = true;
+              }
+            }
+
+            tableSel.addEventListener("change", updateCols);
+            updateCols();
+          })
+          .catch((e) => {
+            const box = document.getElementById("mlResult");
+            if (box) box.textContent = "ML 表结构加载失败：" + e.message;
+          });
+      }
 
       /**
        * 辅助函数：更新情感条与文本
@@ -1135,6 +1414,199 @@
             document.getElementById("sentSource").innerText = "请求失败：" + e;
           });
       });
+
+      // MySQL 机器学习预测（回归 / 分类 / 聚类）
+      const mlBtn = document.getElementById("mlBtn");
+      if (mlBtn) {
+        mlBtn.addEventListener("click", function () {
+          const btn = this;
+          const original = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = "运行中...";
+
+          const tableSel = document.getElementById("mlTable");
+          const featSel = document.getElementById("mlFeatures");
+          const targetSel = document.getElementById("mlTarget");
+          const horizonInput = document.getElementById("mlHorizon");
+
+          const tableName = tableSel ? tableSel.value : "";
+          const featureCols = featSel
+            ? Array.from(featSel.selectedOptions).map((o) => o.value)
+            : [];
+          const targetCol = targetSel ? (targetSel.value || "") : "";
+          const horizon = horizonInput ? Number(horizonInput.value || 0) : 0;
+
+          const fd = new FormData();
+          fd.append("table_name", tableName || "financial_series");
+          fd.append("feature_cols", featureCols.join(","));
+          fd.append("target_col", targetCol);
+          fd.append("horizon", String(horizon));
+
+          fetch("/api/run_ml", { method: "POST", body: fd })
+            .then((r) => r.json())
+            .then((d) => {
+              const box = document.getElementById("mlResult");
+              box.textContent = JSON.stringify(d, null, 2);
+
+              const models = d.models || {};
+              // 回归
+              if (models.regression && !models.regression.error) {
+                renderMlMetrics("mlChartReg", models.regression.metrics || {}, "回归指标");
+              } else {
+                renderMlMetrics("mlChartReg", {}, "回归指标");
+              }
+              // 分类
+              if (models.classification && !models.classification.error) {
+                renderMlMetrics("mlChartCls", models.classification.metrics || {}, "分类指标");
+              } else {
+                renderMlMetrics("mlChartCls", {}, "分类指标");
+              }
+              // 聚类
+              if (models.clustering && !models.clustering.error) {
+                renderMlMetrics("mlChartClu", models.clustering.metrics || {}, "聚类指标");
+              } else {
+                renderMlMetrics("mlChartClu", {}, "聚类指标");
+              }
+
+              // 时间序列预测（若后端返回）
+              if (d.ts_forecast) {
+                renderMlForecast(d.ts_forecast);
+              } else {
+                renderMlForecast(null);
+              }
+            })
+            .catch((e) => {
+              const box = document.getElementById("mlResult");
+              box.textContent = "请求失败：" + e;
+              renderMlMetrics("mlChartReg", {}, "回归指标");
+              renderMlMetrics("mlChartCls", {}, "分类指标");
+              renderMlMetrics("mlChartClu", {}, "聚类指标");
+              renderMlForecast(null);
+            })
+            .finally(() => {
+              btn.disabled = false;
+              btn.textContent = original;
+            });
+        });
+      }
+
+      // 预测类型切换：指数 / 股票 / 通用 ML
+      function switchMlMode(mode) {
+        const panelIndex = document.getElementById("mlPanelIndex");
+        const panelStock = document.getElementById("mlPanelStock");
+        const panelGeneric = document.getElementById("mlPanelGeneric");
+        const genericCharts = document.getElementById("mlGenericCharts");
+
+        if (!panelIndex || !panelStock || !panelGeneric || !genericCharts) return;
+
+        panelIndex.style.display = mode === "index" ? "" : "none";
+        panelStock.style.display = mode === "stock" ? "" : "none";
+        panelGeneric.style.display = mode === "generic" ? "" : "none";
+
+        // 通用 ML 指标图表只在 generic 模式下显示
+        genericCharts.style.display = mode === "generic" ? "" : "none";
+      }
+
+      document.getElementById("mlModeIndex")?.addEventListener("change", function () {
+        if (this.checked) switchMlMode("index");
+      });
+      document.getElementById("mlModeStock")?.addEventListener("change", function () {
+        if (this.checked) switchMlMode("stock");
+      });
+      document.getElementById("mlModeGeneric")?.addEventListener("change", function () {
+        if (this.checked) switchMlMode("generic");
+      });
+
+      // 默认模式：指数预测
+      switchMlMode("index");
+
+      // 单指数预测：调用 /api/ts_index_predict，结果画到统一 TS 图表（mlTsChart）上
+      const indexPredBtn = document.getElementById("indexPredBtn");
+      if (indexPredBtn) {
+        indexPredBtn.addEventListener("click", function () {
+          const btn = this;
+          const original = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = "预测中...";
+
+          const code = document.getElementById("indexPredCode").value;
+          const horizon = Number(document.getElementById("indexPredHorizon").value || 8);
+
+          const fd = new FormData();
+          fd.append("ts_code", code);
+          fd.append("horizon", String(horizon));
+
+          fetch("/api/ts_index_predict", { method: "POST", body: fd })
+            .then((r) => r.json())
+            .then((d) => {
+              if (d.status === "error") {
+                alert("指数预测失败：" + (d.msg || "未知错误"));
+                return;
+              }
+              const hist = d.history || [];
+              const fut = d.forecast || [];
+              renderMlForecast({
+                target_col: code,
+                history: hist.map((p) => ({ y: p.value, date: p.date })),
+                forecast: fut.map((p) => ({ y: p.value, date: p.date })),
+              });
+            })
+            .catch((e) => {
+              alert("指数预测请求失败：" + e);
+            })
+            .finally(() => {
+              btn.disabled = false;
+              btn.textContent = original;
+            });
+        });
+      }
+
+      // 单只股票预测：调用 /api/ts_stock_predict，结果画到统一 TS 图表（mlTsChart）上
+      const stockPredBtn = document.getElementById("stockPredBtn");
+      if (stockPredBtn) {
+        stockPredBtn.addEventListener("click", function () {
+          const btn = this;
+          const original = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = "预测中...";
+
+          const code = document.getElementById("stockPredCode").value.trim();
+          const horizon = Number(document.getElementById("stockPredHorizon").value || 8);
+          if (!code) {
+            alert("请先输入股票代码（ts_code）");
+            btn.disabled = false;
+            btn.textContent = original;
+            return;
+          }
+
+          const fd = new FormData();
+          fd.append("ts_code", code);
+          fd.append("horizon", String(horizon));
+
+          fetch("/api/ts_stock_predict", { method: "POST", body: fd })
+            .then((r) => r.json())
+            .then((d) => {
+              if (d.status === "error") {
+                alert("股票预测失败：" + (d.msg || "未知错误"));
+                return;
+              }
+              const hist = d.history || [];
+              const fut = d.forecast || [];
+              renderMlForecast({
+                target_col: code,
+                history: hist.map((p) => ({ y: p.value, date: p.date })),
+                forecast: fut.map((p) => ({ y: p.value, date: p.date })),
+              });
+            })
+            .catch((e) => {
+              alert("股票预测请求失败：" + e);
+            })
+            .finally(() => {
+              btn.disabled = false;
+              btn.textContent = original;
+            });
+        });
+      }
 
       // 金融讯息可视化分析：TuShare 菁融短讯
       // 设置默认日期（今天）
