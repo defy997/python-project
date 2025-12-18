@@ -107,6 +107,15 @@ def api_db_info():
     )
 
 
+@app.route("/.well-known/appspecific/com.chrome.devtools.json", methods=["GET"])
+def chrome_devtools_discovery():
+    """
+    处理 Chrome 开发者工具的自动发现请求，避免 404 日志。
+    返回空 JSON 表示不支持 Chrome DevTools Protocol。
+    """
+    return jsonify({}), 200
+
+
 def _ensure_ts_index_daily_table(cursor) -> None:
     """确保 TuShare 指数日线表存在（ts_code + trade_date 唯一）。"""
     cursor.execute(
@@ -321,6 +330,29 @@ def _save_ts_flash_to_mysql(items: List[Dict[str, Any]]) -> int:
     try:
         cur = conn.cursor()
         _ensure_ts_flash_table(cur)
+        # 预处理 pub_time，确保写入的是合法的 DATETIME 或 None
+        cleaned_items: List[Dict[str, Any]] = []
+        for it in items:
+            pub = it.get("pub_time")
+            if isinstance(pub, str):
+                pub = pub.strip()
+                # 去掉尾部多余的 "-" 或 " -"
+                if pub.endswith(" -"):
+                    pub = pub[:-2].strip()
+                elif pub.endswith("-"):
+                    pub = pub[:-1].strip()
+            # 简单长度校验，不像 "2025-12-18 22:26:24 -" 这种非法形式
+            if isinstance(pub, str) and len(pub) < 10:
+                pub = None
+            cleaned_items.append(
+                {
+                    "ts_id": it.get("ts_id"),
+                    "pub_time": pub,
+                    "title": it.get("title"),
+                    "content": it.get("content"),
+                    "src": it.get("src"),
+                }
+            )
         sql = """
             INSERT INTO ts_flash (ts_id, pub_time, title, content, src)
             VALUES (%(ts_id)s, %(pub_time)s, %(title)s, %(content)s, %(src)s)
@@ -330,12 +362,212 @@ def _save_ts_flash_to_mysql(items: List[Dict[str, Any]]) -> int:
                 content=VALUES(content),
                 src=VALUES(src);
         """
-        cur.executemany(sql, items)
+        cur.executemany(sql, cleaned_items)
         conn.commit()
         return len(items)
     finally:
         conn.close()
 
+
+def _load_ts_flash_from_mysql(limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    从 MySQL ts_flash 表读取最近的短讯，用于在外部接口失败或无数据时兜底情绪分析。
+    返回列表结构与 _fetch_tushare_flash / _fetch_eastmoney_flash 保持一致：
+        [{"ts_id", "pub_time", "title", "content", "src"}, ...]
+    """
+    conn = get_mysql_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT ts_id, pub_time, title, content, src
+            FROM ts_flash
+            ORDER BY pub_time DESC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        rows = cur.fetchall()
+        items: List[Dict[str, Any]] = []
+        for r in rows:
+            items.append(
+                {
+                    "ts_id": r.get("ts_id"),
+                    "pub_time": r.get("pub_time"),
+                    "title": r.get("title"),
+                    "content": r.get("content"),
+                    "src": r.get("src"),
+                }
+            )
+        return items
+    finally:
+        conn.close()
+
+
+def _clean_flash_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    对短讯列表做简单“数据清洗”：
+        1. 去重：优先按 ts_id 去重，其次按 (title, pub_time) 去重；
+        2. 去噪：去掉过短文本（标题+内容长度 < 5）；
+        3. 规范化：去掉简单 HTML 标签，统一 strip。
+    返回清洗后的新列表。
+    """
+    if not items:
+        return []
+
+    import html
+
+    def strip_html(text: str) -> str:
+        # 非严格 HTML 解析，足够应付简单标签
+        text = html.unescape(text)
+        return re.sub(r"<[^>]+>", "", text)
+
+    seen_ids = set()
+    seen_pairs = set()
+    cleaned: List[Dict[str, Any]] = []
+
+    for it in items:
+        ts_id = (it.get("ts_id") or "").strip()
+        title = str(it.get("title") or "").strip()
+        content = str(it.get("content") or "").strip()
+        pub_time = it.get("pub_time")
+
+        # 去掉 HTML 标签和多余空白
+        if title:
+            title = strip_html(title).strip()
+        if content:
+            content = strip_html(content).strip()
+
+        # 过滤过短文本
+        if len(title) + len(content) < 5:
+            continue
+
+        # 去重：优先按 ts_id
+        if ts_id:
+            if ts_id in seen_ids:
+                continue
+            seen_ids.add(ts_id)
+        else:
+            key = (title, str(pub_time or ""))
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+
+        cleaned.append(
+            {
+                "ts_id": ts_id or it.get("ts_id"),
+                "pub_time": pub_time,
+                "title": title or None,
+                "content": content or None,
+                "src": (it.get("src") or "").strip() or None,
+                # 保留原始 url 以便后续按 url 抓取详情页
+                "url": (it.get("url") or "").strip() or None,
+            }
+        )
+
+    return cleaned
+
+
+def _enrich_flash_content_via_url(
+    items: List[Dict[str, Any]],
+    max_fetch: int = 20,
+    timeout: int = 8,
+) -> List[Dict[str, Any]]:
+    """
+    根据每条短讯中的 url 进一步抓取详情页正文，用正文替换/补充 content，
+    以便后续做更准确的情感分析。
+
+    设计原则：
+      - 只对少量（max_fetch 条）有 url 的记录做抓取，避免请求过多阻塞接口；
+      - 网络异常 / 结构变化时静默降级，保留原始 content。
+    """
+    if not items:
+        return items
+
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+    except Exception:
+        # 运行环境没有安装 bs4，直接跳过增强步骤
+        logger.warning("未安装 BeautifulSoup，跳过根据 url 抓取详情正文的步骤")
+        return items
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/142.0 Safari/537.36"
+        )
+    }
+
+    fetched = 0
+    for it in items:
+        if fetched >= max_fetch:
+            break
+
+        url = (it.get("url") or "").strip()
+        if not url:
+            continue
+
+        # 如果已经有较长的 content，就不再额外抓取
+        existing = (it.get("content") or "").strip()
+        if existing and len(existing) >= 200:
+            continue
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            html = resp.content
+        except Exception as e:
+            logger.debug(f"抓取详情页失败（url={url}）: {e}")
+            continue
+
+        try:
+            try:
+                soup = BeautifulSoup(html, "lxml")
+            except Exception:
+                soup = BeautifulSoup(html, "html.parser")
+
+            # 针对常见新闻站的正文选择器做几轮尝试
+            candidate_selectors = [
+                "div.news-content",
+                "div.article-body",
+                "div#ContentBody",
+                "div.article_cont",
+                "div.txt_cont",
+                "article",
+                "div.content",
+            ]
+            texts: List[str] = []
+            found = False
+            for sel in candidate_selectors:
+                node = soup.select_one(sel)
+                if not node:
+                    continue
+                ps = node.find_all("p")
+                texts = [p.get_text(" ", strip=True) for p in ps if p.get_text(strip=True)]
+                if texts:
+                    found = True
+                    break
+
+            if not found:
+                # 兜底：取 body 下前若干段落
+                body = soup.body
+                if body:
+                    ps = body.find_all("p")
+                    texts = [p.get_text(" ", strip=True) for p in ps if p.get_text(strip=True)]
+
+            full_text = " ".join(texts).strip()
+            if full_text:
+                # 适当截断，避免过长
+                it["content"] = full_text[:4000]
+                fetched += 1
+        except Exception as e:
+            logger.debug(f"解析详情页正文失败（url={url}）: {e}")
+            continue
+
+    if fetched:
+        logger.info(f"已根据 url 抓取并增强 {fetched} 条短讯正文，用于情感分析")
+    return items
 
 def _fetch_tushare_flash(
     start_date: str = "",
@@ -436,6 +668,7 @@ def _fetch_tushare_flash(
     title_col = pick("title", "headline", "name")
     content_col = pick("content", "summary", "text")
     src_col = pick("src", "source")
+    url_col = pick("url", "link", "href", "web_url")
 
     items: List[Dict[str, Any]] = []
     for i, r in df.iterrows():
@@ -444,6 +677,8 @@ def _fetch_tushare_flash(
         title = str(r.get(title_col, "")).strip() if title_col else ""
         content = str(r.get(content_col, "")).strip() if content_col else ""
         src_val = str(r.get(src_col, src)).strip() if src_col else src
+        url_val = str(r.get(url_col, "")).strip() if url_col else ""
+        url_val = url_val or None
 
         # 关键词过滤（如果提供了关键词）
         if keyword and keyword.strip():
@@ -460,6 +695,7 @@ def _fetch_tushare_flash(
                 "title": title[:512] if title else None,
                 "content": content if content else None,
                 "src": src_val[:64] if src_val else src,
+                "url": url_val,
             }
         )
 
@@ -556,6 +792,15 @@ def _fetch_sina_flash(
                 pub_time = ""
             pub_time = str(pub_time).strip() if pub_time else None
 
+            # 详情链接（若有）
+            url_val = (
+                art.get("url")
+                or art.get("docurl")
+                or art.get("wapurl")
+                or ""
+            )
+            url_val = str(url_val).strip() or None
+
             # 关键词过滤
             if search_keyword:
                 kw_lower = search_keyword.lower()
@@ -567,8 +812,9 @@ def _fetch_sina_flash(
                     "ts_id": f"sina-{art.get('id', i)}",
                     "pub_time": pub_time,
                     "title": title[:512],
-                    "content": content[:1000] if content else None,
+                    "content": content[:2000] if content else None,
                     "src": "新浪财经",
+                    "url": url_val,
                 })
                 
             if len(results) >= limit:
@@ -596,104 +842,250 @@ def _fetch_sina_flash(
 def _fetch_eastmoney_flash(
     limit: int = 80,
     keyword: str = "",
+    start_date: str = "",
+    end_date: str = "",
 ) -> List[Dict[str, Any]]:
     """
     函数名称：_fetch_eastmoney_flash
-    函数功能：从第三方 API 获取东方财富 7x24 快讯（不依赖 TuShare，避免权限/频率限制）。
+    函数功能：直接请求东方财富搜索页 HTML（https://so.eastmoney.com/web/s?keyword=...），
+            通过 BeautifulSoup 解析其中的新闻链接。
     说明：
-        - 使用 api.guiguiya.com 的东方财富快讯接口，直接返回 JSON
-        - 若提供关键词，则在结果中做过滤
-        - 若解析失败，将回退到示例数据
+        - 使用 Selenium 打开 https://so.eastmoney.com/web/s?keyword=... 搜索页，解析动态渲染后的 HTML；
+        - 从搜索结果页中抓取指向 finance.eastmoney.com 等新闻详情的链接，
+          将链接文本作为标题，并解析时间与摘要；
+        - 支持按 start_date / end_date 对 pub_time 做服务端过滤，避免情感分析混入太久远的数据。
     参数说明：
         limit: 最大返回条数（默认 80）；
         keyword: 关键词过滤（可选，在标题和内容中匹配）。
     返回值：
         List[Dict]：与 _fetch_tushare_flash 返回结构兼容的 items 列表。
     """
-    import json as _json
+    limit = max(5, min(int(limit or 80), 80))
+    search_keyword = keyword.strip() if keyword and keyword.strip() else "美元"
 
-    limit = max(10, min(int(limit or 80), 50))  # 该 API 最多返回 50 条
-    search_keyword = keyword.strip() if keyword and keyword.strip() else ""
-
-    # 第三方东方财富 7x24 快讯 API（稳定可用）
-    url = "http://api.guiguiya.com/api/hotlist/eastmoney"
+    # 日期过滤：前端传入格式形如 2025-12-18 00:00:00，统一转换为可比较的格式
+    def normalize_date_str(s: str) -> str:
+        """将日期字符串统一为 YYYY-MM-DD HH:MM:SS 格式（不足部分补0）"""
+        if not s:
+            return ""
+        s = s.strip()[:19]
+        # 如果只有日期部分（YYYY-MM-DD），补上时间部分
+        if len(s) == 10:
+            s += " 00:00:00"
+        # 如果只有日期+小时分钟（YYYY-MM-DD HH:MM），补上秒
+        elif len(s) == 16:
+            s += ":00"
+        return s
     
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/129.0 Safari/537.36"
-        ),
-        "Accept": "application/json",
-    }
+    start_str = normalize_date_str(start_date or "")
+    end_str = normalize_date_str(end_date or "")
 
+    # 优先使用 Selenium，复用 test.py 中已验证可用的逻辑
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        
-        if not data.get("success"):
-            raise RuntimeError(data.get("msg", "API 返回失败"))
-        
-        articles = data.get("data", []) or []
-        logger.info(f"东方财富快讯 API 返回 {len(articles)} 条")
-
+        from selenium import webdriver
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.chrome.options import Options
     except Exception as e:
-        logger.warning(f"东方财富快讯 API 请求失败: {e}")
+        logger.warning(f"东方财富 Selenium 依赖缺失，无法使用浏览器爬取: {e}")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return [
             {
-                "ts_id": "em-demo-1",
+                "ts_id": "em-selenium-missing",
                 "pub_time": now,
-                "title": "东方财富快讯获取失败",
-                "content": f"API 请求异常: {str(e)[:200]}",
-                "src": "eastmoney-demo",
+                "title": "服务器未安装 Selenium/Chrome，无法抓取东方财富搜索结果",
+                "content": "请安装 selenium 与 Chrome/Chromedriver，或改用新浪等数据源。",
+                "src": "eastmoney-error",
             }
         ]
 
-    # 解析文章列表
-    results: List[Dict[str, Any]] = []
-    for art in articles:
+    from urllib.parse import quote
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    )
+
+    driver = None
+    items: List[Dict[str, Any]] = []
+    found_too_old = False  # 标记是否遇到早于 start_date 的新闻（说明已翻过目标范围）
+
+    def _collect_from_current_page() -> int:
+        """
+        在当前页面收集 news_item，追加到 items 中。
+        返回：本页收集到的符合日期范围的新闻数量。
+        """
+        nonlocal found_too_old
+        page_count = 0
         try:
-            title = str(art.get("title", "")).strip()
-            content = str(art.get("content", "")).strip()
-            pub_time = str(art.get("time", "")).strip() if art.get("time") else None
-            
-            # 关键词过滤
-            if search_keyword:
-                kw_lower = search_keyword.lower()
-                if kw_lower not in title.lower() and kw_lower not in content.lower():
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_all_elements_located(
+                    (
+                        By.CSS_SELECTOR,
+                        "div.searchindexarticles div.news_list div.news_item",
+                    )
+                )
+            )
+        except Exception:
+            logger.warning("Selenium 未能在规定时间内找到 news_item 元素")
+            return 0
+
+        news_blocks = driver.find_elements(
+            By.CSS_SELECTOR, "div.searchindexarticles div.news_list div.news_item"
+        )
+
+        for block in news_blocks:
+            if len(items) >= limit:
+                break
+
+            try:
+                title_elem = block.find_element(By.CSS_SELECTOR, ".news_item_t a")
+                title = title_elem.text.strip()
+                href = (title_elem.get_attribute("href") or "").strip()
+
+                try:
+                    time_elem = block.find_element(By.CSS_SELECTOR, ".news_item_time")
+                    pub_time = time_elem.text.strip()
+                    if " - " in pub_time:
+                        pub_time = pub_time.split(" - ", 1)[0]
+                except Exception:
+                    pub_time = None
+
+                try:
+                    content_elem = block.find_element(
+                        By.CSS_SELECTOR, ".news_item_c span:not(.news_item_time)"
+                    )
+                    content = content_elem.text.strip()
+                except Exception:
+                    content = title
+
+                if not href or "eastmoney.com" not in href:
+                    continue
+                if not title or len(title) < 4:
                     continue
 
-            if title and len(title) > 2:
-                results.append({
-                    "ts_id": f"em-{art.get('id', len(results))}",
-                    "pub_time": pub_time,
-                    "title": title[:512],
-                    "content": content[:1000] if content else None,
-                    "src": "东方财富",
-                })
-                
-            if len(results) >= limit:
-                break
-        except Exception:
-            continue
+                # 时间窗口过滤（字符串比较依赖统一格式：YYYY-MM-DD HH:MM:SS）
+                if pub_time:
+                    # 统一 pub_time 格式：去掉 " - " 后缀，补全到 YYYY-MM-DD HH:MM:SS
+                    pt_raw = str(pub_time).strip()
+                    if " - " in pt_raw:
+                        pt_raw = pt_raw.split(" - ", 1)[0].strip()
+                    pt = normalize_date_str(pt_raw)
+                    
+                    if not pt:
+                        # 如果无法解析日期，保留该条新闻（不进行日期过滤）
+                        pass
+                    else:
+                        # 如果设置了 start_date 且当前新闻早于 start_date，标记并跳过（说明已翻过目标范围）
+                        if start_str and pt < start_str:
+                            found_too_old = True
+                            continue
+                        # 如果设置了 end_date 且当前新闻晚于 end_date，跳过（说明还没到目标范围，继续翻页）
+                        if end_str and pt > end_str:
+                            continue
 
-    if not results:
+                items.append(
+                    {
+                        "ts_id": f"em-selenium-{len(items)}",
+                        "pub_time": pub_time,
+                        "title": title[:512],
+                        "content": (content or title)[:1000],
+                        "src": "东方财富",
+                        "url": href,
+                    }
+                )
+                page_count += 1
+            except Exception:
+                continue
+        
+        return page_count
+
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        url = f"https://so.eastmoney.com/web/s?keyword={quote(search_keyword)}"
+        logger.info(f"使用 Selenium 打开东方财富搜索页: {url}")
+        driver.get(url)
+
+        time.sleep(3)
+        _collect_from_current_page()
+
+        # 如果不足 limit 条，尝试翻页继续抓取（最多翻 10 页，因为很多页可能被日期过滤掉）
+        current_page = 1
+        max_pages = 10
+        consecutive_empty_pages = 0  # 连续空页计数
+        
+        while len(items) < limit and current_page < max_pages:
+            # 如果遇到早于 start_date 的新闻，说明已翻过目标范围，停止翻页
+            if found_too_old:
+                logger.info(f"遇到早于 start_date ({start_str}) 的新闻，停止翻页")
+                break
+            
+            try:
+                next_btn = driver.find_element(
+                    By.CSS_SELECTOR, "div.c_pager a[title='下一页']"
+                )
+            except Exception:
+                logger.info("未找到'下一页'按钮，停止翻页")
+                break
+
+            try:
+                driver.execute_script("arguments[0].click();", next_btn)
+            except Exception:
+                try:
+                    next_btn.click()
+                except Exception:
+                    logger.warning("点击'下一页'按钮失败")
+                    break
+
+            current_page += 1
+            time.sleep(2)
+            
+            page_count = _collect_from_current_page()
+            
+            # 如果本页没有收集到任何符合日期范围的新闻，计数+1
+            if page_count == 0:
+                consecutive_empty_pages += 1
+                # 如果连续 3 页都没有符合日期范围的新闻，停止翻页（可能已超出日期范围或没有更多数据）
+                if consecutive_empty_pages >= 3:
+                    logger.info(f"连续 {consecutive_empty_pages} 页无符合日期范围的新闻，停止翻页")
+                    break
+            else:
+                consecutive_empty_pages = 0  # 重置计数
+
+    except Exception as e:
+        logger.warning(f"东方财富 Selenium 爬取失败: {e}")
+        items = []
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    if not items:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         msg = f"（关键词: {search_keyword}）" if search_keyword else ""
         return [
             {
-                "ts_id": "em-empty-1",
+                "ts_id": "em-empty",
                 "pub_time": now,
-                "title": f"东方财富快讯无匹配结果{msg}",
-                "content": "请尝试其他关键词或清空关键词获取全部快讯。",
+                "title": f"东方财富搜索无结果{msg}",
+                "content": "可能是页面结构调整、Selenium 未能加载完成或无相关新闻。",
                 "src": "eastmoney-empty",
             }
         ]
 
-    logger.info(f"东方财富快讯解析成功，获取 {len(results)} 条" + (f"（关键词: {search_keyword}）" if search_keyword else ""))
-    return results
+    logger.info(
+        f"东方财富 Selenium 搜索解析成功，关键词: {search_keyword}，"
+        f"日期范围: {start_str or '无限制'} ~ {end_str or '无限制'}，"
+        f"获取 {len(items)} 条（目标: {limit} 条）"
+    )
+    return items[:limit]
 
 
 @app.route("/api/ts_flash_viz", methods=["GET"])
@@ -737,7 +1129,12 @@ def api_ts_flash_viz():
 
     # 若选择数据源为东方财富或新浪财经，则不再调用 TuShare，直接使用第三方 API，避免 TuShare 频率/权限限制
     if src.lower() == "eastmoney":
-        items = _fetch_eastmoney_flash(limit=limit, keyword=keyword)
+        items = _fetch_eastmoney_flash(
+            limit=limit,
+            keyword=keyword,
+            start_date=start_date,
+            end_date=end_date,
+        )
     elif src.lower() == "sina":
         items = _fetch_sina_flash(limit=limit, keyword=keyword)
     else:
@@ -748,6 +1145,25 @@ def api_ts_flash_viz():
             limit=limit,
             keyword=keyword,
         )
+
+    # 若外部接口没有返回任何数据，尝试从数据库 ts_flash 兜底读取最近记录
+    if not items:
+        try:
+            db_items = _load_ts_flash_from_mysql(limit=limit)
+            if db_items:
+                logger.info(f"TuShare/第三方短讯为空，改用数据库 ts_flash 最近 {len(db_items)} 条记录做情绪分析")
+                items = db_items
+        except Exception as e:
+            logger.warning(f"从数据库 ts_flash 兜底读取短讯失败: {e}")
+
+    # 统一做一次数据清洗（去重 / 去噪 / strip HTML）
+    items = _clean_flash_items(items)
+
+    # 根据 url 进一步抓取详情页正文，增强 content（只对少量记录执行，避免阻塞）
+    try:
+        items = _enrich_flash_content_via_url(items, max_fetch=20, timeout=8)
+    except Exception as e:
+        logger.warning(f"根据 url 抓取详情正文时出现异常，已跳过增强步骤: {e}")
 
     # 为每条短讯单独计算情感得分，附加到 items 中（字段名：sentiment）
     for it in items:
@@ -791,8 +1207,30 @@ def api_ts_flash_viz():
             texts.append(str(it["content"]))
     combined = "\n".join(texts)[:3000] if texts else "中性"
     sentiment = analyze_sentiment(combined)
+
+    # 词频统计（词云）
     counter = _tokenize_texts(texts)
     top_words = counter.most_common(80)
+
+    # 其他可视化数据：来源分布 / 文本长度分布
+    from collections import Counter as _Counter
+
+    src_counter: _Counter = _Counter()
+    len_buckets: _Counter = _Counter()
+
+    for it in items:
+        src_val = (it.get("src") or "未知来源").strip()
+        src_counter[src_val] += 1
+        text_len = len(str(it.get("title") or "")) + len(str(it.get("content") or ""))
+        if text_len < 40:
+            len_buckets["<40 字"] += 1
+        elif text_len < 120:
+            len_buckets["40-120 字"] += 1
+        else:
+            len_buckets[">=120 字"] += 1
+
+    source_stats = [{"name": k, "value": int(v)} for k, v in src_counter.most_common(10)]
+    length_buckets = [{"name": k, "value": int(len_buckets[k])} for k in ["<40 字", "40-120 字", ">=120 字"]]
 
     return jsonify(
         {
@@ -801,6 +1239,8 @@ def api_ts_flash_viz():
             "items": items,
             "sentiment": sentiment,
             "words": [{"name": w, "value": int(c)} for w, c in top_words],
+            "source_stats": source_stats,
+            "length_buckets": length_buckets,
         }
     )
 
@@ -1164,58 +1604,6 @@ def api_sentiment_score():
             "sentiment": sentiment,
             "heat": heat,
             "risk": risk,
-        }
-    )
-
-
-@app.route("/api/stock_predict", methods=["POST"])
-def api_stock_predict():
-    """
-    简单股票预测：若提供外部接口则优先使用，否则回退示例 trade.csv。
-    返回历史与未来预测序列。
-    """
-    api_url = request.form.get("api_url", "").strip()
-    horizon = int(request.form.get("horizon", 8) or 8)
-    horizon = max(3, min(horizon, 30))
-
-    df: pd.DataFrame
-    try:
-        if api_url:
-            resp = requests.get(api_url, timeout=10)
-            data = resp.json()
-            records = data.get("data", data.get("prices", data))
-            df = pd.DataFrame(records)
-        else:
-            df, _, _ = load_builtin_dataset("trade")
-    except Exception:
-        df, _, _ = load_builtin_dataset("trade")
-
-    # 选择 close/price 列
-    candidates = ["close", "Close", "price", "Price"]
-    y_col = next((c for c in candidates if c in df.columns), df.columns[-1])
-    df = df.dropna(subset=[y_col]).reset_index(drop=True)
-    y = df[y_col].astype(float).values
-    x = np.arange(len(y))
-
-    if len(y) < 5:
-        return jsonify({"status": "error", "msg": "数据量过少，无法预测"})
-
-    # 一阶线性拟合
-    coef = np.polyfit(x, y, deg=1)
-    poly = np.poly1d(coef)
-
-    future_x = np.arange(len(y), len(y) + horizon)
-    future_y = poly(future_x)
-
-    history = [{"x": int(i), "y": float(v)} for i, v in zip(x.tolist(), y.tolist())]
-    forecast = [{"x": int(i), "y": float(v)} for i, v in zip(future_x.tolist(), future_y.tolist())]
-
-    return jsonify(
-        {
-            "status": "ok",
-            "y_col": y_col,
-            "history": history,
-            "forecast": forecast,
         }
     )
 

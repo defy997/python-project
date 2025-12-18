@@ -227,9 +227,25 @@
                   <span class="text-danger">负向：</span><span id="flashSentNegText">-</span>
                 </div>
               </div>
+              <div class="col-md-4">
+                <div class="section-title mb-1" style="font-size:0.95rem;">情感比例分布</div>
+                <div id="flashSentimentChart" style="height:200px;"></div>
+              </div>
               <div class="col-md-8">
                 <div class="section-title mb-1" style="font-size:0.95rem;">词云</div>
                 <div id="flashWordCloud" style="height:260px"></div>
+              </div>
+            </div>
+
+            <!-- 额外图表：来源分布 + 文本长度分布 -->
+            <div class="row g-2 mt-2">
+              <div class="col-md-6">
+                <div class="section-title mb-1" style="font-size:0.95rem;">来源分布</div>
+                <div id="flashSourceChart" style="height:220px;"></div>
+              </div>
+              <div class="col-md-6">
+                <div class="section-title mb-1" style="font-size:0.95rem;">文本长度分布</div>
+                <div id="flashLenChart" style="height:220px;"></div>
               </div>
             </div>
             <div class="row g-2">
@@ -261,24 +277,13 @@
         <div class="card shadow-sm mb-3 section-block" id="section-predict">
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-2">
-              <div class="section-title mb-0">四、TuShare 多指数行情与预测</div>
+              <div class="section-title mb-0">四、TuShare 多指数行情</div>
               <small class="text-muted">拉取上证/深成/创业/沪深300/中证500 等指数，自动绘制多折线</small>
             </div>
 
             <div class="row g-2 align-items-end mb-2">
               <div class="col-md-4">
                 <button class="btn btn-success w-100" id="tsBtn">拉取 TuShare 指数行情</button>
-              </div>
-              <div class="col-md-4">
-                <label class="form-label">可选：自定义价格接口（返回 data 数组）</label>
-                <input id="predApi" class="form-control" placeholder="http(s)://..." />
-              </div>
-              <div class="col-md-2">
-                <label class="form-label">预测步数</label>
-                <input id="predHorizon" type="number" min="3" max="30" value="8" class="form-control" />
-              </div>
-              <div class="col-md-2">
-                <button class="btn btn-info w-100" id="predBtn">生成预测</button>
               </div>
             </div>
 
@@ -695,6 +700,9 @@
       const chartBox = echarts.init(document.getElementById("chartBox"));
       const wordChart = echarts.init(document.getElementById("wordCloud"));
       const flashWordChart = echarts.init(document.getElementById("flashWordCloud"));
+      const flashSourceChart = echarts.init(document.getElementById("flashSourceChart"));
+      const flashLenChart = echarts.init(document.getElementById("flashLenChart"));
+      const flashSentimentChart = echarts.init(document.getElementById("flashSentimentChart"));
       const predictChart = echarts.init(document.getElementById("predictChart"));
 
       // 外汇折线图：页面初始时可能处于隐藏分页，直接 init 会导致 0 宽高渲染失败
@@ -880,6 +888,13 @@
       chartBox.setOption({ title: { text: "等待数据...", left: "center" } });
       wordChart.setOption({ title: { text: "等待数据...", left: "center" } });
       predictChart.setOption({ title: { text: "等待数据...", left: "center" } });
+      flashSourceChart.setOption({ title: { text: "等待数据...", left: "center" } });
+      flashLenChart.setOption({ title: { text: "等待数据...", left: "center" } });
+      flashSentimentChart.setOption({ 
+        title: { text: "等待数据...", left: "center" },
+        legend: { show: false },
+        series: []
+      });
 
       // 加载 ML 可选表与列
       function loadMlSchema() {
@@ -958,22 +973,37 @@
         box.innerHTML = "";
         (items || []).forEach((it, idx) => {
           const s = it.sentiment || {};
-          const p = Math.round((s.positive || 0) * 100);
-          const n = Math.round((s.neutral || 0) * 100);
-          const g = Math.round((s.negative || 0) * 100);
+          // 计算综合得分：正向接近1，中性接近0.6，负向接近0
+          const p = s.positive !== undefined ? s.positive : 0;
+          const n = s.neutral !== undefined ? s.neutral : 0;
+          const g = s.negative !== undefined ? s.negative : 0;
+          
+          // 综合得分公式：正向*1.0 + 中性*0.6 + 负向*0.0
+          const compositeScore = p * 1.0 + n * 0.6 + g * 0.0;
+          
+          // 根据得分确定颜色
+          let scoreClass = "text-warning"; // 默认中性（黄色）
+          if (compositeScore >= 0.7) {
+            scoreClass = "text-success"; // 正向（绿色）
+          } else if (compositeScore <= 0.3) {
+            scoreClass = "text-danger"; // 负向（红色）
+          }
+          
           const t = it.pub_time || it.datetime || "";
           const title = it.title || "(无标题)";
           const src = it.src || "";
+          const url = it.url || "";
           const div = document.createElement("div");
           div.className = "mb-1";
+          const titleHtml = url
+            ? `<a href="${htmlEscape(url)}" target="_blank" rel="noopener" class="text-primary">${htmlEscape(title)}</a>`
+            : `<span class="text-primary">${htmlEscape(title)}</span>`;
           div.innerHTML =
             `<span class="text-muted">${idx + 1}.</span> ` +
             (t ? `[${htmlEscape(t)}] ` : "") +
-            `<span class="text-primary">${htmlEscape(title)}</span>` +
+            titleHtml +
             (src ? ` <span class="text-muted">(${htmlEscape(src)})</span>` : "") +
-            ` <span class="ms-1 text-success">正向 ${p}%</span>` +
-            ` <span class="ms-1 text-warning">中性 ${n}%</span>` +
-            ` <span class="ms-1 text-danger">负向 ${g}%</span>`;
+            ` <span class="ms-1 ${scoreClass}">得分:${compositeScore}</span>`;
           box.appendChild(div);
         });
       }
@@ -1111,6 +1141,139 @@
                 },
               },
               data: words,
+            },
+          ],
+        });
+      }
+
+      // 金融讯息：来源分布图（饼图）
+      function renderFlashSourceChart(stats) {
+        const data = stats || [];
+        const hasData = Array.isArray(data) && data.length > 0;
+        if (!hasData) {
+          flashSourceChart.setOption({
+            title: { text: "来源分布（暂无数据）", left: "center", textStyle: { fontSize: 12 } },
+            series: [],
+          });
+          return;
+        }
+        flashSourceChart.setOption({
+          tooltip: { trigger: "item" },
+          legend: { top: 10, left: "center" },
+          series: [
+            {
+              type: "pie",
+              radius: "65%",
+              data,
+              label: { formatter: "{b}: {c}" },
+            },
+          ],
+        });
+      }
+
+      // 金融讯息：文本长度分布（柱状图）
+      function renderFlashLenChart(buckets) {
+        const data = buckets || [];
+        const hasData = Array.isArray(data) && data.length > 0;
+        if (!hasData) {
+          flashLenChart.setOption({
+            title: { text: "文本长度分布（暂无数据）", left: "center", textStyle: { fontSize: 12 } },
+            xAxis: { show: false },
+            yAxis: { show: false },
+            series: [],
+          });
+          return;
+        }
+        const names = data.map((d) => d.name);
+        const values = data.map((d) => d.value);
+        flashLenChart.setOption({
+          tooltip: { trigger: "axis" },
+          grid: { left: 40, right: 20, top: 30, bottom: 30 },
+          xAxis: { type: "category", data: names },
+          yAxis: { type: "value" },
+          series: [
+            {
+              type: "bar",
+              data: values,
+              itemStyle: { color: "#0d6efd" },
+            },
+          ],
+        });
+      }
+
+      // 金融讯息：情感比例分布（饼图）
+      function renderFlashSentimentChart(items) {
+        if (!items || items.length === 0) {
+          flashSentimentChart.setOption({
+            title: { text: "情感比例分布（暂无数据）", left: "center", textStyle: { fontSize: 12 } },
+            legend: { show: false },
+            series: [],
+          });
+          return;
+        }
+
+        // 计算所有新闻的情感平均值
+        let totalPos = 0;
+        let totalNeu = 0;
+        let totalNeg = 0;
+        let count = 0;
+
+        items.forEach((it) => {
+          const s = it.sentiment || {};
+          if (s.positive !== undefined || s.neutral !== undefined || s.negative !== undefined) {
+            totalPos += s.positive || 0;
+            totalNeu += s.neutral || 0;
+            totalNeg += s.negative || 0;
+            count++;
+          }
+        });
+
+        if (count === 0) {
+          flashSentimentChart.setOption({
+            title: { text: "情感比例分布（暂无数据）", left: "center", textStyle: { fontSize: 12 } },
+            legend: { show: false },
+            series: [],
+          });
+          return;
+        }
+
+        // 计算平均值并转换为百分比
+        const avgPos = (totalPos / count) * 100;
+        const avgNeu = (totalNeu / count) * 100;
+        const avgNeg = (totalNeg / count) * 100;
+
+        const data = [
+          { value: avgPos, name: "正向", itemStyle: { color: "#28a745" } },
+          { value: avgNeu, name: "中性", itemStyle: { color: "#ffc107" } },
+          { value: avgNeg, name: "负向", itemStyle: { color: "#dc3545" } },
+        ];
+
+        flashSentimentChart.setOption({
+          tooltip: {
+            trigger: "item",
+            formatter: "{b}: {c}% ({d}%)",
+          },
+          legend: {
+            top: 10,
+            left: "right",  // 改为右对齐，布局往右一点
+            orient: "vertical",  // 垂直排列
+          },
+          series: [
+            {
+              type: "pie",
+              radius: "65%",
+              center: ["40%", "55%"],  // 饼图稍微往左移，为右侧legend留空间
+              data: data,
+              label: {
+                formatter: "{b}: {c}%",
+              },
+              emphasis: {
+                itemStyle: {
+                  shadowBlur: 10,
+                  shadowOffsetX: 0,
+                  shadowColor: "rgba(0, 0, 0, 0.5)",
+                },
+              },
             },
           ],
         });
@@ -1671,45 +1834,20 @@
             // 列表展示：每条短讯 + 单条情感得分
             renderFlashList(d.items || []);
             updateFlashSentimentBar(d.sentiment || {});
+            renderFlashSentimentChart(d.items || []); // 渲染情感比例饼图
             renderFlashWordCloud(d.words || []);
+            renderFlashSourceChart(d.source_stats || []);
+            renderFlashLenChart(d.length_buckets || []);
             document.getElementById("flashStatus").innerText = `完成：共 ${d.rows || 0} 条菁融短讯${keyword ? `（关键词: ${keyword}）` : ""}`;
-            // 确保词云在可见尺寸下渲染
-            setTimeout(() => flashWordChart.resize(), 0);
+            // 确保词云和饼图在可见尺寸下渲染
+            setTimeout(() => {
+              flashWordChart.resize();
+              flashSentimentChart.resize();
+            }, 0);
           })
           .catch((e) => {
             document.getElementById("flashStatus").innerText = "失败：" + e.message;
             alert("菁融短讯拉取失败：" + e.message);
-          })
-          .finally(() => {
-            btn.disabled = false;
-            btn.textContent = original;
-          });
-      });
-
-      // 股票预测
-      document.getElementById("predBtn").addEventListener("click", function () {
-        const btn = this;
-        const original = btn.textContent;
-        btn.disabled = true;
-        btn.textContent = "预测中...";
-        const fd = new FormData();
-        fd.append("api_url", document.getElementById("predApi").value);
-        fd.append("horizon", document.getElementById("predHorizon").value);
-        fetch("/api/stock_predict", { method: "POST", body: fd })
-          .then((r) => r.json())
-          .then((d) => {
-            if (d.status === "ok") {
-              renderPredict(d.history || [], d.forecast || [], d.y_col);
-            } else {
-              predictChart.setOption({
-                title: { text: d.msg || "预测失败", left: "center" },
-              });
-            }
-          })
-          .catch((e) => {
-            predictChart.setOption({
-              title: { text: "请求失败：" + e, left: "center" },
-            });
           })
           .finally(() => {
             btn.disabled = false;
