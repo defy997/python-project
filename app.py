@@ -404,6 +404,42 @@ def _load_ts_flash_from_mysql(limit: int = 200) -> List[Dict[str, Any]]:
         conn.close()
 
 
+def _extract_source_from_content(title: str = "", content: str = "") -> str | None:
+    """
+    从新闻标题或内容中提取来源信息。
+    支持的格式：
+    - "来源:财联社"
+    - "来源：财联社"
+    - "来源 财联社"
+    - "来源财联社"
+    - "[来源:财联社]"
+    - "（来源：财联社）"
+    """
+    text = f"{title} {content}".strip()
+    if not text:
+        return None
+    
+    # 常见的来源标识模式
+    patterns = [
+        re.compile(r"来源[：:]\s*([^\s，,。.；;）)]+)"),  # 来源:财联社
+        re.compile(r"来源\s+([^\s，,。.；;）)]+)"),  # 来源 财联社
+        re.compile(r"\[来源[：:]\s*([^\]]+)\]"),  # [来源:财联社]
+        re.compile(r"（来源[：:]\s*([^）]+)）"),  # （来源：财联社）
+        re.compile(r"来源([^\s，,。.；;）)]+)"),  # 来源财联社
+    ]
+    
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            source = match.group(1).strip()
+            # 清理可能的标点符号
+            source = source.rstrip("，,。.；;）)]")
+            if source and len(source) <= 64:  # 限制长度
+                return source
+    
+    return None
+
+
 def _clean_flash_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     对短讯列表做简单“数据清洗”：
@@ -470,7 +506,7 @@ def _clean_flash_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _enrich_flash_content_via_url(
     items: List[Dict[str, Any]],
-    max_fetch: int = 20,
+    max_fetch: int = None,
     timeout: int = 8,
 ) -> List[Dict[str, Any]]:
     """
@@ -478,7 +514,7 @@ def _enrich_flash_content_via_url(
     以便后续做更准确的情感分析。
 
     设计原则：
-      - 只对少量（max_fetch 条）有 url 的记录做抓取，避免请求过多阻塞接口；
+      - 对所有有 url 的记录做抓取（max_fetch=None 表示无限制）；
       - 网络异常 / 结构变化时静默降级，保留原始 content。
     """
     if not items:
@@ -501,7 +537,7 @@ def _enrich_flash_content_via_url(
 
     fetched = 0
     for it in items:
-        if fetched >= max_fetch:
+        if max_fetch is not None and fetched >= max_fetch:
             break
 
         url = (it.get("url") or "").strip()
@@ -1159,9 +1195,9 @@ def api_ts_flash_viz():
     # 统一做一次数据清洗（去重 / 去噪 / strip HTML）
     items = _clean_flash_items(items)
 
-    # 根据 url 进一步抓取详情页正文，增强 content（只对少量记录执行，避免阻塞）
+    # 根据 url 进一步抓取详情页正文，增强 content（对所有有 url 的记录执行）
     try:
-        items = _enrich_flash_content_via_url(items, max_fetch=20, timeout=8)
+        items = _enrich_flash_content_via_url(items, max_fetch=None, timeout=8)
     except Exception as e:
         logger.warning(f"根据 url 抓取详情正文时出现异常，已跳过增强步骤: {e}")
 
@@ -1199,17 +1235,44 @@ def api_ts_flash_viz():
     except Exception as e:
         logger.warning(f"短讯写入数据库失败（不影响前端展示）: {e}")
 
-    texts = []
+    # 情感分析：基于每个新闻的 sentiment 得分聚合计算
+    total_positive = 0.0
+    total_neutral = 0.0
+    total_negative = 0.0
+    sentiment_count = 0
+    
     for it in items:
-        if it.get("title"):
-            texts.append(str(it["title"]))
-        if it.get("content"):
-            texts.append(str(it["content"]))
-    combined = "\n".join(texts)[:3000] if texts else "中性"
-    sentiment = analyze_sentiment(combined)
+        s = it.get("sentiment")
+        if s and isinstance(s, dict):
+            p = s.get("positive", 0.0)
+            n = s.get("neutral", 0.0)
+            g = s.get("negative", 0.0)
+            # 确保是数值类型
+            try:
+                total_positive += float(p) if p is not None else 0.0
+                total_neutral += float(n) if n is not None else 0.0
+                total_negative += float(g) if g is not None else 0.0
+                sentiment_count += 1
+            except (ValueError, TypeError):
+                continue
+    
+    # 计算平均值
+    if sentiment_count > 0:
+        sentiment = {
+            "positive": total_positive / sentiment_count,
+            "neutral": total_neutral / sentiment_count,
+            "negative": total_negative / sentiment_count,
+        }
+    else:
+        # 如果没有有效的 sentiment 数据，使用默认值
+        sentiment = {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
 
-    # 词频统计（词云）
-    counter = _tokenize_texts(texts)
+    # 词频统计（词云）：仅使用新闻文本内容，不包括标题
+    texts_for_wordcloud = []
+    for it in items:
+        if it.get("content"):
+            texts_for_wordcloud.append(str(it["content"]))
+    counter = _tokenize_texts(texts_for_wordcloud)
     top_words = counter.most_common(80)
 
     # 其他可视化数据：来源分布 / 文本长度分布
@@ -1219,7 +1282,17 @@ def api_ts_flash_viz():
     len_buckets: _Counter = _Counter()
 
     for it in items:
-        src_val = (it.get("src") or "未知来源").strip()
+        # 优先从新闻内容中提取来源信息
+        extracted_src = _extract_source_from_content(
+            title=str(it.get("title") or ""),
+            content=str(it.get("content") or "")
+        )
+        # 如果提取到来源，更新 items 中的 src 字段，用于前端显示
+        if extracted_src:
+            it["src"] = extracted_src
+        # 统计来源分布时，使用提取的来源或原始 src
+        src_val = extracted_src or (it.get("src") or "未知来源")
+        src_val = src_val.strip() or "未知来源"
         src_counter[src_val] += 1
         text_len = len(str(it.get("title") or "")) + len(str(it.get("content") or ""))
         if text_len < 40:
@@ -1263,13 +1336,28 @@ def _build_texts_from_request() -> Tuple[List[str], str]:
     # 1) 上传 CSV
     if "file" in request.files:
         f = request.files["file"]
-        if f and f.filename.endswith(".csv"):
-            try:
-                df = pd.read_csv(f, encoding="utf-8-sig")
-            except UnicodeDecodeError:
-                f.stream.seek(0)
-                df = pd.read_csv(f, encoding="gbk")
-            return _extract_text_list_from_df(df), "上传文件"
+        if f and f.filename:
+            # 检查文件扩展名
+            if not f.filename.lower().endswith(".csv"):
+                logger.warning(f"上传的文件不是CSV格式: {f.filename}")
+                # 不返回错误，继续尝试其他数据源
+            else:
+                try:
+                    df = pd.read_csv(f, encoding="utf-8-sig")
+                    logger.info(f"成功读取CSV文件: {f.filename}, 行数: {len(df)}")
+                    return _extract_text_list_from_df(df), f"上传文件: {f.filename}"
+                except UnicodeDecodeError:
+                    try:
+                        f.stream.seek(0)
+                        df = pd.read_csv(f, encoding="gbk")
+                        logger.info(f"使用GBK编码成功读取CSV文件: {f.filename}, 行数: {len(df)}")
+                        return _extract_text_list_from_df(df), f"上传文件: {f.filename}"
+                    except Exception as e:
+                        logger.error(f"读取CSV文件失败: {e}")
+                        # 继续尝试其他数据源
+                except Exception as e:
+                    logger.error(f"处理CSV文件时出错: {e}")
+                    # 继续尝试其他数据源
 
     # 2) 文本框
     raw_text = request.form.get("text_data", "").strip()
@@ -1292,16 +1380,97 @@ def _build_texts_from_request() -> Tuple[List[str], str]:
 
 def _tokenize_texts(texts: List[str]) -> Counter:
     """
-    简单分词：按非中英文/数字拆分，再统计词频。
+    分词并清洗：按非中英文/数字拆分，再统计词频。
+    清洗规则：
+    1. 过滤日期（如 2024-12-18, 2024年12月18日, 12/18/2024 等）
+    2. 过滤短数字（纯数字且长度 <= 3）
+    3. 过滤无单位的纯数字（纯数字且后面没有单位字符）
     若有 jieba 可替换为更优分词，这里保持零依赖。
     """
     counter: Counter = Counter()
-    pattern = re.compile(r"[A-Za-z0-9\u4e00-\u9fa5]+")
+    
+    # 日期模式：匹配各种日期格式
+    date_patterns = [
+        re.compile(r"^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日]?$"),  # 2024-12-18, 2024/12/18, 2024年12月18日
+        re.compile(r"^\d{1,2}[-/月]\d{1,2}[-/日]?$"),  # 12-18, 12/18, 12月18日
+        re.compile(r"^\d{4}年\d{1,2}月\d{1,2}日$"),  # 2024年12月18日
+    ]
+    
+    # 常见单位字符（中文和符号）
+    unit_chars = "元万元亿元美元欧元日元英镑点个次倍股手张份笔单条项家人户%％百分点bpsbppct万千百十"
+    
     for t in texts:
-        for m in pattern.findall(t):
-            # 过滤过短词
-            if len(m.strip()) >= 2:
-                counter[m.strip().lower()] += 1
+        if not t or not isinstance(t, str):
+            continue
+        
+        # 预处理：将"数字+单位"合并为一个标记，避免分词时分离
+        # 匹配数字后跟单位的情况，如 "123元", "456%", "789点" 等
+        # 使用占位符临时替换，分词后再恢复
+        placeholders = {}
+        placeholder_idx = 0
+        
+        # 匹配数字+单位的模式
+        def replace_with_placeholder(match):
+            nonlocal placeholder_idx
+            num = match.group(1)
+            unit = match.group(2)
+            placeholder = f"__NUMUNIT{placeholder_idx}__"
+            placeholders[placeholder] = num + unit
+            placeholder_idx += 1
+            return placeholder
+        
+        # 匹配数字后跟单位（中文单位或符号单位）
+        t_processed = re.sub(
+            r"(\d+(?:\.\d+)?)([元万元亿元美元欧元日元英镑点个次倍股手张份笔单条项家人户%％百分点bpsbppct万千百十]+)",
+            replace_with_placeholder,
+            t
+        )
+        
+        # 分词：按非中英文/数字拆分
+        pattern = re.compile(r"[A-Za-z0-9\u4e00-\u9fa5]+")
+        matches = pattern.findall(t_processed)
+        
+        for m in matches:
+            word = m.strip()
+            if len(word) < 2:
+                continue
+            
+            # 恢复占位符（完整匹配）
+            if word in placeholders:
+                word = placeholders[word]
+            # 过滤占位符片段（如果占位符被拆分，如 "NUMUNIT0" 等）
+            elif word.startswith("NUMUNIT") or word.startswith("numunit") or "__NUMUNIT" in word.upper():
+                continue
+            
+            word_lower = word.lower()
+            
+            # 1. 过滤日期
+            is_date = False
+            for dp in date_patterns:
+                if dp.match(word):
+                    is_date = True
+                    break
+            if is_date:
+                continue
+            
+            # 2. 检查是否为纯数字
+            if word.isdigit() or (word.replace(".", "").isdigit() and word.count(".") <= 1):
+                # 2.1 过滤短数字（长度 <= 3，包括小数）
+                num_len = len(word.replace(".", ""))
+                if num_len <= 3:
+                    continue
+                
+                # 2.2 如果是纯数字（没有单位），过滤掉
+                # 注意：如果数字后面有单位，在预处理时已经被合并，所以这里检查不到单位的就是纯数字
+                continue
+            
+            # 3. 过滤纯数字+少量字母的组合（如 "123a", "456b" 等，但保留 "USD123" 这种）
+            if re.match(r"^\d+[a-z]{1,2}$", word_lower):
+                continue
+            
+            # 4. 保留其他有效词汇（包括带单位的数字）
+            counter[word_lower] += 1
+    
     return counter
 
 
@@ -1318,250 +1487,6 @@ def index() -> str:
     return render_template("index.html")  # 渲染首页模板
 
 
-def _build_df_from_request() -> pd.DataFrame:
-    """
-    函数名称：_build_df_from_request
-    函数功能：根据前端传来的表单内容构建 DataFrame。
-    优先顺序：上传文件 > 文本粘贴 > 内置示例数据。
-    参数说明：
-        无（直接从全局 request 对象读取）。
-    返回值：
-        pd.DataFrame：构建好的数据表。
-    """
-    # 1. 如果用户上传了 CSV 文件，则优先使用
-    if "file" in request.files:
-        f = request.files["file"]
-        if f and f.filename.endswith(".csv"):
-            # 将上传文件读取为 DataFrame，优先尝试 UTF-8，失败时回退到 GBK
-            try:
-                return pd.read_csv(f, encoding="utf-8-sig")
-            except UnicodeDecodeError:
-                f.stream.seek(0)  # 重置文件指针
-                # 兼容旧版 pandas：不传 errors 参数，只切换为 GBK 编码
-                return pd.read_csv(f, encoding="gbk")
-
-    # 2. 如果用户在文本框中粘贴了 CSV 文本
-    text_data = request.form.get("text_data", "").strip()
-    if text_data:
-        from io import StringIO
-
-        # 使用 StringIO 将文本包装成“文件对象”
-        return pd.read_csv(StringIO(text_data))
-
-    # 3. 否则尝试加载内置示例数据
-    dataset = request.form.get("dataset", "ads")  # 默认使用 advertising 示例
-    df, _, _ = load_builtin_dataset(dataset)
-    return df
-
-
-@app.route("/analyze", methods=["POST"])
-@handle_api_errors
-def analyze() -> Any:
-    """
-    函数名称：analyze
-    函数功能：处理前端的"开始分析"请求，执行数据分析和 AI 文本分析，并返回 JSON 结构。
-    参数说明：
-        无（从 request.form / request.files 读取）。
-    返回值：
-        Flask Response：包含分析结果的 JSON 响应。
-    """
-    logger.info("收到分析请求")
-    
-    # 从请求中获取用户选定的列信息
-    x_col = request.form.get("x_col", "").strip()
-    y_col = request.form.get("y_col", "").strip()
-
-    # 构建 DataFrame
-    try:
-        df = _build_df_from_request()
-    except Exception as e:
-        logger.error(f"构建 DataFrame 失败: {e}")
-        return jsonify({"status": "error", "msg": f"数据读取失败: {str(e)}"}), 400
-
-    # 验证数据
-    validation = validate_dataframe(df, min_rows=2)
-    if not validation["valid"]:
-        return jsonify({"status": "error", "msg": validation["msg"]}), 400
-
-    # 如果未指定列名，简单取前两列作为 X/Y
-    if not x_col or x_col not in df.columns:
-        x_col = df.columns[0]
-        logger.info(f"自动选择 X 轴列: {x_col}")
-    if not y_col or y_col not in df.columns:
-        y_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
-        logger.info(f"自动选择 Y 轴列: {y_col}")
-
-    # 调用数据分析模块
-    try:
-        result: AnalysisResult = analyze_financial_dataframe(df, x_col, y_col)
-    except Exception as e:
-        logger.error(f"数据分析失败: {e}")
-        return jsonify({"status": "error", "msg": f"数据分析失败: {str(e)}"}), 500
-
-    # 文本与 AI 分析相关
-    raw_text = request.form.get("doc_text", "").strip()
-    if raw_text:
-        try:
-            summary = summarize_financial_text(raw_text)      # AI 摘要
-            sentiment = analyze_sentiment(raw_text)           # 情感分析
-        except Exception as e:
-            logger.warning(f"AI 分析失败: {e}")
-            summary = "AI 分析暂时不可用"
-            sentiment = {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
-    else:
-        summary = ""
-        sentiment = {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
-
-    # 将结果打包为 JSON
-    payload: Dict[str, Any] = {
-        "status": "ok",               # 状态码
-        "x_col": x_col,               # 实际使用的 X 列
-        "y_col": y_col,               # 实际使用的 Y 列
-        "summary": result.summary,    # 数值分析摘要
-        "stats": result.stats,        # 统计结果
-        "charts": result.charts,      # 多种图表数据
-        "files": result.saved_files,  # 已保存的本地文件
-        "ai_summary": summary,        # 文本 AI 摘要
-        "sentiment": sentiment,       # 情感分析分布
-    }
-
-    logger.info("分析完成，返回结果")
-    return jsonify(payload)  # 返回 JSON 响应
-
-
-@app.route("/files/<path:filename>", methods=["GET"])
-def download_file(filename: str):
-    """
-    函数名称：download_file
-    函数功能：向前端提供输出结果文件的下载功能。
-    参数说明：
-        filename (str)：文件名相对路径。
-    返回值：
-        Flask Response：文件下载响应。
-    """
-    return send_from_directory(str(OUTPUT_DIR), filename, as_attachment=True)
-
-
-@app.route("/api/crawl_news", methods=["POST"])
-@handle_api_errors
-def api_crawl_news():
-    """
-    函数名称：api_crawl_news
-    函数功能：根据关键字爬取金融新闻列表并保存到 MySQL。
-    前端控件传入：
-        keyword：新闻搜索关键字。
-        table_name：保存到 MySQL 的表名。
-    返回值：
-        JSON：包含爬取数量和预览数据。
-    """
-    keyword = request.form.get("keyword", "").strip() or "金融"
-    table_name = request.form.get("table_name", "news_data").strip() or "news_data"
-    
-    if not keyword:
-        return jsonify({"status": "error", "msg": "关键字不能为空"}), 400
-    
-    logger.info(f"开始爬取新闻，关键字: {keyword}, 表名: {table_name}")
-
-    try:
-        df_news = crawl_financial_news(keyword)  # 爬取新闻
-        if not df_news.empty:
-            save_to_mysql(df_news, table_name)   # 保存到 MySQL
-            logger.info(f"成功爬取 {len(df_news)} 条新闻并保存到 {table_name}")
-        else:
-            logger.warning(f"未爬取到任何新闻数据")
-    except Exception as e:
-        logger.error(f"爬取新闻失败: {e}")
-        return jsonify({"status": "error", "msg": f"爬取失败: {str(e)}"}), 500
-
-    preview = df_news.head(10).to_dict(orient="records")
-    return jsonify(
-        {
-            "status": "ok",
-            "source": "news",
-            "keyword": keyword,
-            "table": table_name,
-            "rows": int(len(df_news)),
-            "preview": preview,
-        }
-    )
-
-
-@app.route("/api/crawl_price", methods=["POST"])
-def api_crawl_price():
-    """
-    函数名称：api_crawl_price
-    函数功能：根据用户输入的 API 地址爬取价格时间序列，并保存到 MySQL。
-    前端控件传入：
-        api_url：返回 JSON 的接口地址；
-        table_name：保存到 MySQL 的表名。
-    返回值：
-        JSON：包含爬取数量和预览数据。
-    """
-    api_url = request.form.get("api_url", "").strip()
-    table_name = request.form.get("table_name", "financial_series")
-
-    if not api_url:
-        return jsonify({"status": "error", "msg": "api_url 不能为空"})
-
-    df_price = crawl_simple_price_series(api_url)
-    if not df_price.empty:
-        save_to_mysql(df_price, table_name)
-
-    preview = df_price.head(10).to_dict(orient="records")
-    return jsonify(
-        {
-            "status": "ok",
-            "source": "price",
-            "api_url": api_url,
-            "table": table_name,
-            "rows": int(len(df_price)),
-            "preview": preview,
-        }
-    )
-
-
-@app.route("/api/crawl_news_v2", methods=["POST"])
-def api_crawl_news_v2():
-    """
-    增强版新闻爬虫接口：允许指定关键字与表名，返回更多预览。
-    若外网失败，回落到内置示例。
-    """
-    keyword = request.form.get("keyword", "").strip() or "金融"
-    table_name = request.form.get("table_name", "news_data")
-
-    try:
-        df_news = crawl_financial_news(keyword)
-    except Exception:
-        df_news = pd.DataFrame()
-
-    if df_news.empty:
-        df_news = pd.DataFrame(
-            {
-                "keyword": [keyword] * 3,
-                "title": [
-                    f"{keyword} 政策对市场影响待评估",
-                    f"{keyword} 数据公布，波动加剧",
-                    f"机构解读：{keyword} 相关资产走势",
-                ],
-                "url": [
-                    "https://example.com/a",
-                    "https://example.com/b",
-                    "https://example.com/c",
-                ],
-            }
-        )
-
-    save_to_mysql(df_news, table_name)
-    preview = df_news.head(10).to_dict(orient="records")
-    return jsonify(
-        {
-            "status": "ok",
-            "keyword": keyword,
-            "table": table_name,
-            "rows": int(len(df_news)),
-            "preview": preview,
-        }
-    )
 
 
 @app.route("/api/wordcloud", methods=["POST"])
@@ -1578,32 +1503,6 @@ def api_wordcloud():
             "status": "ok",
             "source": source,
             "words": [{"name": w, "value": int(c)} for w, c in top_words],
-        }
-    )
-
-
-@app.route("/api/sentiment_score", methods=["POST"])
-def api_sentiment_score():
-    """
-    对文本集合做情感评分，并附加简单热度/风险分。
-    """
-    texts, source = _build_texts_from_request()
-    combined = "\n".join(texts)[:2000]  # 防止过长
-    sentiment = analyze_sentiment(combined if combined else "中性")
-
-    # 热度分：按文本条数归一到 0~1
-    heat = min(1.0, len(texts) / 50.0)
-
-    # 简单风险分：负向概率加权
-    risk = round(sentiment.get("negative", 0.33) * 10, 2)
-
-    return jsonify(
-        {
-            "status": "ok",
-            "source": source,
-            "sentiment": sentiment,
-            "heat": heat,
-            "risk": risk,
         }
     )
 
@@ -2443,6 +2342,57 @@ def api_ts_index_predict():
     )
 
 
+def _list_news_tables() -> List[Dict[str, Any]]:
+    """
+    函数名称：_list_news_tables
+    函数功能：列出包含新闻数据的 MySQL 表。
+    返回值：
+        List[Dict]：[{name: 表名, label: 友好名称}, ...]
+    """
+    conn = get_mysql_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SHOW TABLES")
+        rows = cur.fetchall()
+        tables: List[Dict[str, Any]] = []
+        db_key = None
+        if rows:
+            db_key = next(iter(rows[0].keys()))
+        for r in rows:
+            name = r.get(db_key) if db_key else None
+            if not name:
+                continue
+            t = str(name)
+            low = t.lower()
+            # 只保留新闻相关的表
+            if any(k in low for k in ["news", "flash", "article", "content"]):
+                label = t
+                # 为常见表增加友好说明
+                friendly = {
+                    "news_data": "news_data（新闻数据）",
+                    "ts_flash": "ts_flash（TuShare 菁融短讯）",
+                }
+                if t in friendly:
+                    label = friendly[t]
+                tables.append({"name": t, "label": label})
+        return tables
+    finally:
+        conn.close()
+
+
+@app.route("/api/news_tables", methods=["GET"])
+@handle_api_errors
+def api_news_tables():
+    """
+    函数名称：api_news_tables
+    函数功能：为词云模块提供可选的新闻表列表。
+    返回值：
+        JSON：{tables: [{name, label}, ...]}
+    """
+    tables = _list_news_tables()
+    return jsonify({"status": "ok", "tables": tables})
+
+
 @app.route("/api/ml_schema", methods=["GET"])
 @handle_api_errors
 def api_ml_schema():
@@ -2623,15 +2573,103 @@ def api_ts_stock_range():
     base = closes[0]
     cum_change = [round((c / base - 1.0) * 100, 2) for c in closes]
 
-    return jsonify(
-        {
-            "status": "ok",
-            "ts_code": ts_code,
-            "dates": dates,
-            "closes": closes,
-            "cum_change": cum_change,
-        }
-    )
+    # 因子模型与回归分析：计算个股收益率与市场收益率的关系
+    factor_model = None
+    # 使用沪深300作为市场基准
+    market_code = "000300.SH"  # 沪深300
+    market_returns = []
+    stock_returns = []
+    scatter_data = []  # 散点图数据：[市场收益率, 个股收益率]
+    
+    # 1. 计算个股日收益率
+    for i in range(1, len(closes)):
+        stock_return = (closes[i] / closes[i-1] - 1.0) * 100  # 日收益率（%）
+        stock_returns.append(stock_return)
+    
+    # 2. 获取市场指数（沪深300）数据
+    try:
+        pro = ts.pro_api(TUSHARE_TOKEN)
+        # 获取与个股相同日期区间的市场数据
+        market_df = pro.index_daily(ts_code=market_code, start_date=start_date, end_date=end_date)
+        if not market_df.empty:
+            market_df = market_df.sort_values("trade_date")
+            market_closes = market_df["close"].astype(float).tolist()
+            market_dates = market_df["trade_date"].tolist()
+            
+            # 计算市场日收益率
+            for i in range(1, len(market_closes)):
+                market_return = (market_closes[i] / market_closes[i-1] - 1.0) * 100  # 日收益率（%）
+                market_returns.append(market_return)
+            
+            # 3. 对齐日期，构建散点图数据（需要匹配相同日期的收益率）
+            # 简化处理：假设数据按日期对齐，取较短的长度
+            min_len = min(len(stock_returns), len(market_returns))
+            if min_len > 0:
+                stock_returns_aligned = stock_returns[:min_len]
+                market_returns_aligned = market_returns[:min_len]
+                
+                # 构建散点图数据
+                for i in range(min_len):
+                    scatter_data.append([
+                        round(market_returns_aligned[i], 4),
+                        round(stock_returns_aligned[i], 4)
+                    ])
+                
+                # 4. 线性回归：Y = alpha + beta * X
+                # X: 市场收益率, Y: 个股收益率
+                if len(scatter_data) >= 2:
+                    x_market = np.array(market_returns_aligned)
+                    y_stock = np.array(stock_returns_aligned)
+                    
+                    # 使用最小二乘法拟合
+                    coef = np.polyfit(x_market, y_stock, deg=1)
+                    beta = float(coef[0])  # 斜率，即Beta系数
+                    alpha = float(coef[1])  # 截距，即Alpha
+                    
+                    # 计算R²（决定系数）
+                    y_pred = coef[0] * x_market + coef[1]
+                    ss_res = np.sum((y_stock - y_pred) ** 2)
+                    ss_tot = np.sum((y_stock - np.mean(y_stock)) ** 2)
+                    r_squared = float(1 - (ss_res / ss_tot)) if ss_tot > 0 else 0.0
+                    
+                    # 生成回归线数据点（用于绘制趋势线）
+                    x_min, x_max = float(np.min(x_market)), float(np.max(x_market))
+                    regression_line = [
+                        [x_min, round(alpha + beta * x_min, 4)],
+                        [x_max, round(alpha + beta * x_max, 4)]
+                    ]
+                    
+                    factor_model = {
+                        "scatter_data": scatter_data,
+                        "regression_line": regression_line,
+                        "beta": round(beta, 4),  # Beta系数
+                        "alpha": round(alpha, 4),  # Alpha
+                        "r_squared": round(r_squared, 4),  # R²
+                        "market_code": market_code,
+                    }
+                else:
+                    factor_model = None
+            else:
+                factor_model = None
+        else:
+            factor_model = None
+    except Exception as e:
+        logger.warning(f"获取市场指数数据失败，无法进行因子模型分析: {e}")
+        factor_model = None
+
+    result = {
+        "status": "ok",
+        "ts_code": ts_code,
+        "dates": dates,
+        "closes": closes,
+        "cum_change": cum_change,
+    }
+    
+    # 添加因子模型数据（如果计算成功）
+    if factor_model:
+        result["factor_model"] = factor_model
+    
+    return jsonify(result)
 
 
 @app.route("/api/ts_stock_predict", methods=["POST"])

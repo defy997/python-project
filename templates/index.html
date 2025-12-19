@@ -100,67 +100,67 @@
       <div class="row">
         <div class="col-md-2 col-lg-2 mb-3">
           <div class="list-group shadow-sm" id="sideNav">
-            <a class="list-group-item list-group-item-action" data-target="section-crawler" href="#">爬虫取数</a>
             <a class="list-group-item list-group-item-action" data-target="section-wordcloud" href="#">词云</a>
             <a class="list-group-item list-group-item-action" data-target="section-sentiment" href="#">金融讯息可视化分析</a>
             <a class="list-group-item list-group-item-action" data-target="section-predict" href="#">股票预测</a>
-            <a class="list-group-item list-group-item-action" data-target="section-analysis" href="#">数据分析</a>
           </div>
         </div>
 
         <!-- 右侧主体内容（分页切换） -->
         <div class="col-md-10 col-lg-10">
 
-        <!-- 爬虫与数据获取 -->
-        <div class="card shadow-sm mb-3 section-block" id="section-crawler">
-          <div class="card-body">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-              <div class="section-title mb-0">一、爬虫获取金融新闻并入库</div>
-              <small class="text-muted">外网可用时将尝试实时抓取，失败自动回退示例数据</small>
-            </div>
-            <div class="row g-2 align-items-end">
-              <div class="col-md-4">
-                <label class="form-label">新闻关键字</label>
-                <input id="crawlKeyword" class="form-control" placeholder="例如：利率 / 中概股" />
-              </div>
-              <div class="col-md-4">
-                <label class="form-label">保存到 MySQL 表名</label>
-                <input id="crawlTable" class="form-control" value="news_data" />
-              </div>
-              <div class="col-md-4">
-                <button class="btn btn-success w-100" id="crawlBtn">抓取并保存</button>
-              </div>
-            </div>
-            <pre class="bg-dark text-light p-2 small mt-2" style="max-height:180px;overflow:auto" id="crawlPreview"></pre>
-          </div>
-        </div>
-
         <!-- 词云 -->
         <div class="card shadow-sm mb-3 section-block" id="section-wordcloud">
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-2">
-              <div class="section-title mb-0">二、词云可视化</div>
-              <small class="text-muted">数据源：爬虫表 / 上传 CSV / 文本框</small>
+              <div class="section-title mb-0">一、词云可视化</div>
+              <small class="text-muted">选择数据来源，浏览新闻标题，点击标题生成词云</small>
+            </div>
+            <div class="row g-2 align-items-end mb-2">
+              <div class="col-md-3">
+                <label class="form-label">数据来源</label>
+                <select id="wcSource" class="form-select">
+                  <option value="sina" selected>新浪财经</option>
+                  <option value="eastmoney">东方财富</option>
+                  <option value="wallstreetcn">华尔街见闻</option>
+                  <option value="10jqka">同花顺</option>
+                  <option value="yuncaijing">云财经</option>
+                  <option value="fenghuang">凤凰新闻</option>
+                  <option value="jinrongjie">金融界</option>
+                  <option value="cls">财联社</option>
+                  <option value="yicai">第一财经</option>
+                </select>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">关键词搜索（可选）</label>
+                <input id="wcKeyword" type="text" class="form-control" placeholder="如：美联储" />
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">条数</label>
+                <input id="wcLimit" type="number" min="10" max="200" value="50" class="form-control" />
+              </div>
+              <div class="col-md-2">
+                <button class="btn btn-primary w-100" id="wcLoadBtn">加载新闻</button>
+              </div>
+              <div class="col-md-2">
+                <button class="btn btn-success w-100" id="wcBtn" disabled>生成词云</button>
+              </div>
+            </div>
+            <div class="row g-2 mb-2">
+              <div class="col-md-12 small text-muted" id="wcStatus"></div>
             </div>
             <div class="row g-2">
-              <div class="col-md-3">
-                <label class="form-label">MySQL 表名（可选）</label>
-                <input id="wcTable" class="form-control" placeholder="如：news_data" />
-              </div>
-              <div class="col-md-3">
-                <label class="form-label">上传 CSV（第一列为文本）</label>
-                <input id="wcFile" type="file" accept=".csv" class="form-control" />
+              <div class="col-md-6">
+                <div class="section-title mb-1" style="font-size:0.9rem;">新闻标题列表（点击选择）</div>
+                <div id="wcNewsList" style="max-height:300px;overflow:auto;border:1px solid #dee2e6;border-radius:4px;padding:10px;" class="small">
+                  <div class="text-muted text-center">请先点击"加载新闻"获取新闻列表</div>
+                </div>
               </div>
               <div class="col-md-6">
-                <label class="form-label">或直接粘贴文本</label>
-                <textarea id="wcText" rows="2" class="form-control" placeholder="多段文本可换行"></textarea>
+                <div class="section-title mb-1" style="font-size:0.9rem;">词云</div>
+                <div id="wordCloud" style="height:300px;"></div>
               </div>
             </div>
-            <div class="mt-2 d-flex align-items-center gap-2">
-              <button class="btn btn-primary" id="wcBtn">生成词云</button>
-              <small class="text-muted" id="wcSource"></small>
-            </div>
-            <div id="wordCloud" style="height:300px" class="mt-2"></div>
           </div>
         </div>
 
@@ -168,8 +168,8 @@
         <div class="card shadow-sm mb-3 section-block" id="section-sentiment">
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-2">
-              <div class="section-title mb-0">三、金融讯息可视化分析（TuShare 菁融短讯）</div>
-              <small class="text-muted">优先使用菁融短讯接口（jrdc），失败则回退到 news 接口，支持关键词搜索，生成情感分析与词云（后续可扩展更多图表）</small>
+              <div class="section-title mb-0">三、金融讯息可视化分析</div>
+             
             </div>
             <div class="row g-2 align-items-end mb-2">
               <div class="col-md-2">
@@ -203,7 +203,7 @@
                 <input id="flashLimit" type="number" min="10" max="1500" value="80" class="form-control" />
               </div>
               <div class="col-md-2">
-                <button class="btn btn-success w-100" id="flashBtn">拉取菁融短讯</button>
+                <button class="btn btn-success w-100" id="flashBtn">拉取</button>
               </div>
             </div>
             <div class="row g-2 mb-2">
@@ -214,7 +214,7 @@
             <!-- 每条短讯 + 单条情感得分列表 -->
             <div class="mt-2 small" style="max-height:220px;overflow:auto" id="flashList"></div>
             <div class="row g-2 mt-2">
-              <div class="col-md-4">
+              <div class="col-md-3">
                 <div class="section-title mb-1" style="font-size:0.95rem;">情感分析</div>
                 <div class="sentiment-bar mb-1">
                   <div id="flashSentPos" class="sentiment-seg sentiment-pos" style="width:33%"></div>
@@ -227,11 +227,11 @@
                   <span class="text-danger">负向：</span><span id="flashSentNegText">-</span>
                 </div>
               </div>
-              <div class="col-md-4">
+              <div class="col-md-4 offset-md-1">
                 <div class="section-title mb-1" style="font-size:0.95rem;">情感比例分布</div>
                 <div id="flashSentimentChart" style="height:200px;"></div>
               </div>
-              <div class="col-md-8">
+              <div class="col-md-4">
                 <div class="section-title mb-1" style="font-size:0.95rem;">词云</div>
                 <div id="flashWordCloud" style="height:260px"></div>
               </div>
@@ -245,30 +245,8 @@
               </div>
               <div class="col-md-6">
                 <div class="section-title mb-1" style="font-size:0.95rem;">文本长度分布</div>
-                <div id="flashLenChart" style="height:220px;"></div>
+                <div id="flashLenChart" style="height:260px;"></div>
               </div>
-            </div>
-            <div class="row g-2">
-              <div class="col-md-3">
-                <label class="form-label">MySQL 表名（可选）</label>
-                <input id="sentTable" class="form-control" placeholder="如：news_data" />
-              </div>
-              <div class="col-md-3">
-                <label class="form-label">上传 CSV</label>
-                <input id="sentFile" type="file" accept=".csv" class="form-control" />
-              </div>
-              <div class="col-md-6">
-                <label class="form-label">粘贴文本</label>
-                <textarea id="sentText" rows="2" class="form-control" placeholder="情绪文本，可多行"></textarea>
-              </div>
-            </div>
-            <div class="mt-2">
-              <button class="btn btn-warning" id="sentBtn">计算评分</button>
-              <span class="text-muted small ms-2" id="sentSource"></span>
-            </div>
-            <div class="mt-2 small">
-              <div>情感：<span id="sentPosText2" class="text-success">-</span> / <span id="sentNeuText2" class="text-secondary">-</span> / <span id="sentNegText2" class="text-danger">-</span></div>
-              <div>热度：<span id="sentHeat">-</span>，风险评分：<span id="sentRisk">-</span></div>
             </div>
           </div>
         </div>
@@ -362,7 +340,16 @@
                     <button class="btn btn-primary w-100" id="stockBtn">查询涨幅</button>
                   </div>
                 </div>
-                <div id="stockChart" style="height:260px" class="mt-2"></div>
+                <div class="row g-2 mt-2">
+                  <div class="col-md-6">
+                    <div class="section-title mb-1" style="font-size:0.9rem;">累计涨幅</div>
+                    <div id="stockChart" style="height:260px;"></div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="section-title mb-1" style="font-size:0.9rem;">因子模型与回归分析</div>
+                    <div id="stockRiskReturnChart" style="height:260px;"></div>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -495,194 +482,6 @@
           </div>
         </div>
 
-      <!-- 数据分析分页容器 -->
-      <div class="section-block" id="section-analysis">
-      <!-- 输入区域：数据与文本 -->
-      <div class="row g-3 mb-3">
-        <div class="col-md-6">
-          <div class="card shadow-sm">
-            <div class="card-body">
-              <div class="section-title">一、金融数据输入</div>
-              <div class="mb-2 small text-muted">
-                支持三种方式：1）上传 CSV 文件；2）在下方文本框粘贴表格数据；3）使用示例内置数据集。
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">1）上传 CSV 文件</label>
-                <input
-                  type="file"
-                  class="form-control"
-                  id="fileInput"
-                  accept=".csv"
-                />
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">2）粘贴 CSV 文本</label>
-                <textarea
-                  class="form-control"
-                  id="textData"
-                  rows="4"
-                  placeholder="在此粘贴以逗号分隔的表格数据（首行为列名）"
-                ></textarea>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">3）使用内置示例数据集</label>
-                <select class="form-select" id="datasetSelect">
-                  <option value="ads" selected>广告投放与销售数据（advertising.csv）</option>
-                  <option value="trade">股票交易数据（trade.csv）</option>
-                </select>
-              </div>
-
-              <div class="row g-2">
-                <div class="col">
-                  <label class="form-label">X 轴列名（可留空自动推断）</label>
-                  <input
-                    type="text"
-                    class="form-control"
-                    id="xCol"
-                    placeholder="例如：TV / Open"
-                  />
-                </div>
-                <div class="col">
-                  <label class="form-label">Y 轴列名（可留空自动推断）</label>
-                  <input
-                    type="text"
-                    class="form-control"
-                    id="yCol"
-                    placeholder="例如：Sales / Close"
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="col-md-6">
-          <div class="card shadow-sm h-100">
-            <div class="card-body d-flex flex-column">
-              <div class="section-title">二、金融文献 / 新闻文本</div>
-              <div class="mb-2 small text-muted">
-                将金融研究报告、新闻或公告粘贴在此，系统将调用“AI 模型”生成摘要并进行情感分析（示例实现）。
-              </div>
-              <textarea
-                class="form-control mb-3 flex-grow-1"
-                id="docText"
-                rows="6"
-                placeholder="在此粘贴金融文本，例如一段关于某只股票的研究报告或市场新闻……"
-              ></textarea>
-
-              <div class="d-flex justify-content-between align-items-center">
-                <button class="btn btn-primary" id="analyzeBtn">
-                  开始分析
-                </button>
-                <span class="small text-muted" id="statusText"></span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 数值分析与 AI 文本分析结果 -->
-      <div class="row g-3 mb-3">
-        <div class="col-md-8">
-          <div class="card shadow-sm">
-            <div class="card-body">
-              <div class="section-title">
-                三、数值分析摘要
-                <small class="text-muted" id="xyLabel"></small>
-              </div>
-              <div id="summaryBox" class="summary-box small">
-                点击“开始分析”后，这里将展示基于金融数据的简要分析结论。
-              </div>
-              <div class="mt-2 small text-muted" id="savedFiles"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="col-md-4">
-          <div class="card shadow-sm h-100">
-            <div class="card-body">
-              <div class="section-title">四、AI 文本摘要与情感分析</div>
-              <div
-                id="aiSummary"
-                class="summary-box small mb-2"
-                style="min-height: 80px"
-              >
-                若输入了金融文本，这里将给出“AI 模型”生成的摘要示例。
-              </div>
-              <div class="small text-muted mb-1">情感分布：</div>
-              <div class="sentiment-bar mb-1">
-                <div
-                  id="sentPos"
-                  class="sentiment-seg sentiment-pos"
-                  style="width: 33%"
-                ></div>
-                <div
-                  id="sentNeu"
-                  class="sentiment-seg sentiment-neu"
-                  style="width: 34%"
-                ></div>
-                <div
-                  id="sentNeg"
-                  class="sentiment-seg sentiment-neg"
-                  style="width: 33%"
-                ></div>
-              </div>
-              <div class="small">
-                <span class="text-success">正向：</span
-                ><span id="sentPosText">33%</span>，
-                <span class="text-warning">中性：</span
-                ><span id="sentNeuText">34%</span>，
-                <span class="text-danger">负向：</span
-                ><span id="sentNegText">33%</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 五类及以上图形展示 -->
-      <div class="card shadow-sm mb-3">
-        <div class="card-body">
-          <div class="section-title mb-2">五、多维度图形可视化（不少于 5 类）</div>
-          <div class="row g-3">
-            <div class="col-md-6">
-              <div class="chart-card">
-                <div id="chartLine" class="chart-box"></div>
-              </div>
-              <div class="small text-muted mt-1 text-center">折线图：收益趋势</div>
-            </div>
-            <div class="col-md-6">
-              <div class="chart-card">
-                <div id="chartBar" class="chart-box"></div>
-              </div>
-              <div class="small text-muted mt-1 text-center">柱状图：收益对比</div>
-            </div>
-            <div class="col-md-4">
-              <div class="chart-card">
-                <div id="chartPie" class="chart-box"></div>
-              </div>
-              <div class="small text-muted mt-1 text-center">饼图：收益区间占比</div>
-            </div>
-            <div class="col-md-4">
-              <div class="chart-card">
-                <div id="chartScatter" class="chart-box"></div>
-              </div>
-              <div class="small text-muted mt-1 text-center">散点图：单期收益散点分布</div>
-            </div>
-            <div class="col-md-4">
-              <div class="chart-card">
-                <div id="chartBox" class="chart-box"></div>
-              </div>
-              <div class="small text-muted mt-1 text-center">箱线图：整体收益分布</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-        </div> <!-- /section-analysis -->
         </div> <!-- /右侧主体 -->
       </div> <!-- /row -->
 
@@ -693,11 +492,6 @@
 
     <script>
       // 初始化图表实例
-      const chartLine = echarts.init(document.getElementById("chartLine"));
-      const chartBar = echarts.init(document.getElementById("chartBar"));
-      const chartPie = echarts.init(document.getElementById("chartPie"));
-      const chartScatter = echarts.init(document.getElementById("chartScatter"));
-      const chartBox = echarts.init(document.getElementById("chartBox"));
       const wordChart = echarts.init(document.getElementById("wordCloud"));
       const flashWordChart = echarts.init(document.getElementById("flashWordCloud"));
       const flashSourceChart = echarts.init(document.getElementById("flashSourceChart"));
@@ -727,7 +521,7 @@
           link.classList.toggle("active", link.dataset.target === id);
         });
 
-        // 首次切换到“股票预测”分页时自动获取指数与货币数据 + 加载 ML 表结构
+        // 首次切换到"股票预测"分页时自动获取指数与货币数据 + 加载 ML 表结构
         if (id === "section-predict" && !predictLoaded) {
           if (typeof loadTsMarket === "function") {
             loadTsMarket();
@@ -741,6 +535,13 @@
           predictLoaded = true;
         }
 
+        // 首次切换到"词云"分页时确保图表正确显示
+        if (id === "section-wordcloud") {
+          setTimeout(() => {
+            wordChart.resize();
+          }, 0);
+        }
+
         // 切换到股票预测分页后，强制 resize 所有图表，避免图表容器初始宽高为 0
         if (id === "section-predict") {
           setTimeout(() => {
@@ -752,6 +553,12 @@
             if (stockDom) {
               const stockInst = echarts.getInstanceByDom(stockDom);
               if (stockInst) stockInst.resize();
+            }
+            // 风险收益分析散点图
+            const riskReturnDom = document.getElementById("stockRiskReturnChart");
+            if (riskReturnDom) {
+              const riskReturnInst = echarts.getInstanceByDom(riskReturnDom);
+              if (riskReturnInst) riskReturnInst.resize();
             }
           }, 50);
         }
@@ -881,17 +688,12 @@
       }
 
       // 设置空白初始配置
-      chartLine.setOption({ title: { text: "等待数据...", left: "center" } });
-      chartBar.setOption({ title: { text: "等待数据...", left: "center" } });
-      chartPie.setOption({ title: { text: "等待数据...", left: "center" } });
-      chartScatter.setOption({ title: { text: "等待数据...", left: "center" } });
-      chartBox.setOption({ title: { text: "等待数据...", left: "center" } });
-      wordChart.setOption({ title: { text: "等待数据...", left: "center" } });
+      wordChart.setOption({ title: { show: false }, series: [] });
       predictChart.setOption({ title: { text: "等待数据...", left: "center" } });
-      flashSourceChart.setOption({ title: { text: "等待数据...", left: "center" } });
-      flashLenChart.setOption({ title: { text: "等待数据...", left: "center" } });
+      flashSourceChart.setOption({ title: { show: false }, series: [] });
+      flashLenChart.setOption({ title: { show: false }, series: [] });
       flashSentimentChart.setOption({ 
-        title: { text: "等待数据...", left: "center" },
+        title: { show: false },
         legend: { show: false },
         series: []
       });
@@ -1008,92 +810,6 @@
         });
       }
 
-      /**
-       * 辅助函数：根据后端返回数据更新所有图表
-       */
-      function updateCharts(payload) {
-        const charts = payload.charts || {};
-        const x = charts.line?.x || [];
-        const y = charts.line?.y || [];
-
-        // 折线图
-        chartLine.setOption({
-          tooltip: { trigger: "axis" },
-          xAxis: { type: "category", data: x },
-          yAxis: { type: "value" },
-          series: [
-            {
-              name: payload.y_col,
-              type: "line",
-              smooth: true,
-              areaStyle: {},
-              data: y,
-            },
-          ],
-        });
-
-        // 柱状图
-        chartBar.setOption({
-          tooltip: { trigger: "axis" },
-          xAxis: { type: "category", data: charts.bar?.x || [] },
-          yAxis: { type: "value" },
-          series: [
-            {
-              name: payload.y_col,
-              type: "bar",
-              data: charts.bar?.y || [],
-              itemStyle: { color: "#0d6efd" },
-            },
-          ],
-        });
-
-        // 饼图
-        chartPie.setOption({
-          tooltip: { trigger: "item" },
-          legend: { top: "bottom" },
-          series: [
-            {
-              name: "收益区间",
-              type: "pie",
-              radius: "65%",
-              data: charts.pie || [],
-            },
-          ],
-        });
-
-        // 散点图
-        const scatterX = charts.scatter?.x || [];
-        const scatterY = charts.scatter?.y || [];
-        const scatterData = scatterX.map((v, i) => [v, scatterY[i]]);
-        chartScatter.setOption({
-          tooltip: { trigger: "item" },
-          xAxis: { type: "value", name: "期数" },
-          yAxis: { type: "value", name: payload.y_col },
-          series: [
-            {
-              name: "单期收益",
-              type: "scatter",
-              symbolSize: 8,
-              data: scatterData,
-            },
-          ],
-        });
-
-        // 箱线图
-        const box = charts.boxplot?.data || [];
-        chartBox.setOption({
-          tooltip: { trigger: "item" },
-          xAxis: { type: "category", data: [payload.y_col] },
-          yAxis: { type: "value" },
-          series: [
-            {
-              name: "收益分布",
-              type: "boxplot",
-              data: [box],
-            },
-          ],
-        });
-      }
 
       /**
        * 词云渲染
@@ -1152,23 +868,59 @@
         const hasData = Array.isArray(data) && data.length > 0;
         if (!hasData) {
           flashSourceChart.setOption({
-            title: { text: "来源分布（暂无数据）", left: "center", textStyle: { fontSize: 12 } },
+            title: { show: false },
             series: [],
           });
           return;
         }
+        
+        // 为数据添加颜色（如果没有）
+        const colors = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de", "#3ba272", "#fc8452", "#9a60b4", "#ea7ccc", "#5ab1ef"];
+        const dataWithColors = data.map((item, index) => ({
+          name: item.name || item.label || "未知",
+          value: item.value || 0,
+          itemStyle: { color: colors[index % colors.length] }
+        }));
+        
         flashSourceChart.setOption({
-          tooltip: { trigger: "item" },
-          legend: { top: 10, left: "center" },
+          tooltip: { 
+            trigger: "item",
+            formatter: "{b}: {c} ({d}%)"
+          },
+          legend: { 
+            top: 10,
+            left: "center",
+            orient: "horizontal"
+          },
           series: [
             {
               type: "pie",
-              radius: "65%",
-              data,
-              label: { formatter: "{b}: {c}" },
+              radius: ["40%", "70%"], // 环形图
+              center: ["50%", "55%"],
+              avoidLabelOverlap: true,
+              itemStyle: {
+                borderRadius: 5,
+                borderColor: "#fff",
+                borderWidth: 2
+              },
+              label: {
+                show: true,
+                formatter: "{b}\n{c} ({d}%)",
+                fontSize: 11
+              },
+              emphasis: {
+                label: {
+                  show: true,
+                  fontSize: 13,
+                  fontWeight: "bold"
+                }
+              },
+              data: dataWithColors,
             },
           ],
         });
+        // 确保图表正确渲染
+        flashSourceChart.resize();
       }
 
       // 金融讯息：文本长度分布（柱状图）
@@ -1177,7 +929,7 @@
         const hasData = Array.isArray(data) && data.length > 0;
         if (!hasData) {
           flashLenChart.setOption({
-            title: { text: "文本长度分布（暂无数据）", left: "center", textStyle: { fontSize: 12 } },
+            title: { show: false },
             xAxis: { show: false },
             yAxis: { show: false },
             series: [],
@@ -1194,6 +946,7 @@
           series: [
             {
               type: "bar",
+              barWidth: "50%", // 减小柱体宽度
               data: values,
               itemStyle: { color: "#0d6efd" },
             },
@@ -1205,7 +958,7 @@
       function renderFlashSentimentChart(items) {
         if (!items || items.length === 0) {
           flashSentimentChart.setOption({
-            title: { text: "情感比例分布（暂无数据）", left: "center", textStyle: { fontSize: 12 } },
+            title: { show: false },
             legend: { show: false },
             series: [],
           });
@@ -1230,7 +983,7 @@
 
         if (count === 0) {
           flashSentimentChart.setOption({
-            title: { text: "情感比例分布（暂无数据）", left: "center", textStyle: { fontSize: 12 } },
+            title: { show: false },
             legend: { show: false },
             series: [],
           });
@@ -1489,9 +1242,11 @@
        */
       function renderStockRange(dates, cumChange, code) {
         const dom = document.getElementById("stockChart");
-        const stockChart = echarts.init(dom);
+        if (!dom) return;
+        const stockChart = echarts.getInstanceByDom(dom) || echarts.init(dom);
         stockChart.setOption({
           tooltip: { trigger: "axis" },
+          grid: { left: 50, right: 20, top: 20, bottom: 40 },
           xAxis: { type: "category", data: dates },
           yAxis: { type: "value", name: "累计涨幅(%)" },
           series: [
@@ -1507,76 +1262,318 @@
       }
 
       /**
+       * 因子模型与回归分析散点图渲染
+       */
+      function renderStockFactorModel(factorModel, code) {
+        const dom = document.getElementById("stockRiskReturnChart");
+        if (!dom) return;
+        const factorChart = echarts.getInstanceByDom(dom) || echarts.init(dom);
+        
+        if (!factorModel || !factorModel.scatter_data || factorModel.scatter_data.length === 0) {
+          factorChart.setOption({
+            title: { show: false },
+            series: [],
+          });
+          return;
+        }
+
+        const scatterData = factorModel.scatter_data;
+        const regressionLine = factorModel.regression_line || [];
+        const beta = factorModel.beta || 0;
+        const alpha = factorModel.alpha || 0;
+        const rSquared = factorModel.r_squared || 0;
+        const marketCode = factorModel.market_code || "000300.SH";
+        
+        // 计算残差（数据点与回归线的偏离）
+        const residuals = scatterData.map(point => {
+          const marketRet = point[0];
+          const stockRet = point[1];
+          const predictedRet = alpha + beta * marketRet;
+          return Math.abs(stockRet - predictedRet);
+        });
+        const maxResidual = Math.max(...residuals);
+        
+        factorChart.setOption({
+          tooltip: {
+            trigger: "item",
+            formatter: function(params) {
+              if (params.seriesName === "回归线") {
+                return `回归线<br/>Y = ${alpha.toFixed(4)} + ${beta.toFixed(4)} × X<br/>R² = ${rSquared.toFixed(4)}`;
+              }
+              const point = params.data;
+              const marketRet = point[0];
+              const stockRet = point[1];
+              const predictedRet = alpha + beta * marketRet;
+              const residual = stockRet - predictedRet;
+              return `${code || "股票"}<br/>市场收益率: ${marketRet.toFixed(4)}%<br/>个股收益率: ${stockRet.toFixed(4)}%<br/>预测收益率: ${predictedRet.toFixed(4)}%<br/>残差: ${residual.toFixed(4)}%`;
+            }
+          },
+          grid: { left: 60, right: 20, top: 50, bottom: 50 },
+          xAxis: {
+            type: "value",
+            name: `市场收益率（${marketCode} %）`,
+            nameLocation: "middle",
+            nameGap: 30,
+            axisLine: { lineStyle: { color: "#666" } },
+            splitLine: { show: true, lineStyle: { type: "dashed" } }
+          },
+          yAxis: {
+            type: "value",
+            name: "个股收益率（%）",
+            nameLocation: "middle",
+            nameGap: 50,
+            axisLine: { lineStyle: { color: "#666" } },
+            splitLine: { show: true, lineStyle: { type: "dashed" } }
+          },
+          series: [
+            {
+              name: "散点",
+              type: "scatter",
+              symbolSize: function(data, params) {
+                // 根据残差大小调整点的大小，残差越大点越大
+                const marketRet = data[0];
+                const stockRet = data[1];
+                const predictedRet = alpha + beta * marketRet;
+                const residual = Math.abs(stockRet - predictedRet);
+                const size = 8 + (residual / maxResidual) * 12; // 8-20之间
+                return size;
+              },
+              data: scatterData,
+              itemStyle: {
+                color: function(params) {
+                  // 根据残差大小着色：残差大=红色，残差小=蓝色
+                  const marketRet = params.data[0];
+                  const stockRet = params.data[1];
+                  const predictedRet = alpha + beta * marketRet;
+                  const residual = Math.abs(stockRet - predictedRet);
+                  const normalizedResidual = residual / maxResidual;
+                  if (normalizedResidual > 0.7) return "#dc3545"; // 大残差（红色）
+                  if (normalizedResidual > 0.4) return "#ffc107"; // 中等残差（黄色）
+                  return "#0d6efd"; // 小残差（蓝色）
+                },
+                opacity: 0.7
+              }
+            },
+            {
+              name: "回归线",
+              type: "line",
+              data: regressionLine,
+              lineStyle: {
+                color: "#28a745",
+                width: 2,
+                type: "solid"
+              },
+              symbol: "none",
+              smooth: false,
+              tooltip: {
+                show: true
+              }
+            }
+          ],
+          title: {
+            show: true,
+            text: `Beta = ${beta.toFixed(4)} | R² = ${rSquared.toFixed(4)}`,
+            left: "center",
+            top: 10,
+            textStyle: {
+              fontSize: 12,
+              fontWeight: "bold"
+            }
+          }
+        });
+      }
+
+      /**
        * 点击“开始分析”按钮时，将表单数据打包并通过 fetch 提交给后端
        */
 
-      // 爬虫按钮
-      document.getElementById("crawlBtn").addEventListener("click", function () {
-        const fd = new FormData();
-        fd.append("keyword", document.getElementById("crawlKeyword").value);
-        fd.append("table_name", document.getElementById("crawlTable").value);
-        fetch("/api/crawl_news_v2", { method: "POST", body: fd })
-          .then((r) => r.json())
+
+      // 词云：选中的新闻ID列表和新闻数据缓存
+      let selectedNewsIds = new Set();
+      let wcNewsDataCache = []; // 缓存加载的新闻数据
+
+      // 渲染新闻标题列表
+      function renderWcNewsList(items) {
+        // 保存到缓存
+        wcNewsDataCache = items || [];
+        const listBox = document.getElementById("wcNewsList");
+        if (!listBox) return;
+        listBox.innerHTML = "";
+        
+        if (!items || items.length === 0) {
+          listBox.innerHTML = '<div class="text-muted text-center">暂无新闻数据</div>';
+          return;
+        }
+
+        items.forEach((it, idx) => {
+          const newsId = it.ts_id || `news-${idx}`;
+          const isSelected = selectedNewsIds.has(newsId);
+          const t = it.pub_time || "";
+          const title = it.title || "(无标题)";
+          const src = it.src || "";
+          
+          const div = document.createElement("div");
+          div.className = `mb-2 p-2 border rounded ${isSelected ? "bg-primary text-white" : "bg-light"}`;
+          div.style.cursor = "pointer";
+          div.dataset.newsId = newsId;
+          
+          div.innerHTML = `
+            <div class="d-flex align-items-start">
+              <input type="checkbox" ${isSelected ? "checked" : ""} class="me-2 mt-1" style="pointer-events:none;">
+              <div class="flex-grow-1">
+                <div class="fw-bold">${htmlEscape(title)}</div>
+                <div class="small ${isSelected ? "text-white-50" : "text-muted"}">
+                  ${t ? `[${htmlEscape(t)}] ` : ""}${src ? `(${htmlEscape(src)})` : ""}
+                </div>
+              </div>
+            </div>
+          `;
+          
+          div.addEventListener("click", function() {
+            if (selectedNewsIds.has(newsId)) {
+              selectedNewsIds.delete(newsId);
+            } else {
+              selectedNewsIds.add(newsId);
+            }
+            renderWcNewsList(items); // 重新渲染以更新选中状态
+            // 更新生成词云按钮状态
+            document.getElementById("wcBtn").disabled = selectedNewsIds.size === 0;
+          });
+          
+          listBox.appendChild(div);
+        });
+      }
+
+      // 加载新闻列表
+      document.getElementById("wcLoadBtn").addEventListener("click", function () {
+        const btn = this;
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "加载中...";
+        
+        const src = document.getElementById("wcSource").value || "sina";
+        const keyword = document.getElementById("wcKeyword").value.trim();
+        const limit = Number(document.getElementById("wcLimit").value || 50);
+        
+        document.getElementById("wcStatus").innerText = "正在加载新闻...";
+        selectedNewsIds.clear(); // 清空之前的选择
+        
+        // 构建查询参数
+        const params = new URLSearchParams();
+        params.append("src", src);
+        params.append("limit", limit.toString());
+        if (keyword) params.append("keyword", keyword);
+        
+        // 使用今天的日期范围
+        const today = new Date();
+        const startDate = today.toISOString().slice(0, 10) + " 00:00:00";
+        const endDate = today.toISOString().slice(0, 10) + " 23:59:59";
+        params.append("start_date", startDate);
+        params.append("end_date", endDate);
+        
+        fetch(`/api/ts_flash_viz?${params.toString()}`)
+          .then((r) => {
+            if (!r.ok) {
+              return r.json().then((d) => {
+                throw new Error(d.msg || `HTTP ${r.status}`);
+              });
+            }
+            return r.json();
+          })
           .then((d) => {
-            document.getElementById("crawlPreview").textContent = JSON.stringify(
-              d,
-              null,
-              2
-            );
+            if (d.status === "error") {
+              throw new Error(d.msg || "加载失败");
+            }
+            renderWcNewsList(d.items || []);
+            document.getElementById("wcStatus").innerText = `加载完成：共 ${d.rows || 0} 条新闻${keyword ? `（关键词: ${keyword}）` : ""}`;
+            document.getElementById("wcBtn").disabled = selectedNewsIds.size === 0;
           })
           .catch((e) => {
-            document.getElementById("crawlPreview").textContent =
-              "请求失败：" + e;
+            document.getElementById("wcStatus").innerText = "加载失败：" + e.message;
+            console.error("加载新闻失败:", e);
+          })
+          .finally(() => {
+            btn.disabled = false;
+            btn.textContent = original;
           });
       });
 
-      // 词云
+      // 生成词云（基于选定的新闻）
       document.getElementById("wcBtn").addEventListener("click", function () {
+        if (selectedNewsIds.size === 0) {
+          alert("请先选择至少一条新闻");
+          return;
+        }
+        
+        // 从缓存中获取选定的新闻内容
+        const selectedNews = wcNewsDataCache.filter(it => {
+          const newsId = it.ts_id || `news-${wcNewsDataCache.indexOf(it)}`;
+          return selectedNewsIds.has(newsId);
+        });
+        
+        if (selectedNews.length === 0) {
+          alert("未找到选定的新闻数据");
+          return;
+        }
+        
+        // 收集所有选定新闻的文本内容（标题+内容）
+        const texts = [];
+        selectedNews.forEach(it => {
+          if (it.title) texts.push(String(it.title));
+          if (it.content) texts.push(String(it.content));
+        });
+        
+        if (texts.length === 0) {
+          alert("选定的新闻没有文本内容");
+          return;
+        }
+        
+        // 显示加载状态
+        const btn = this;
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "生成中...";
+        document.getElementById("wcStatus").innerText = "正在生成词云...";
+        
+        // 调用词云API（文本数据会经过数据清洗）
         const fd = new FormData();
-        const file = document.getElementById("wcFile").files[0];
-        if (file) fd.append("file", file);
-        fd.append("text_data", document.getElementById("wcText").value);
-        fd.append("table_name", document.getElementById("wcTable").value);
+        fd.append("text_data", texts.join("\n"));
+        
         fetch("/api/wordcloud", { method: "POST", body: fd })
-          .then((r) => r.json())
+          .then((r) => {
+            if (!r.ok) {
+              return r.json().then((d) => {
+                throw new Error(d.msg || `HTTP ${r.status}`);
+              }).catch(() => {
+                throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+              });
+            }
+            return r.json();
+          })
           .then((d) => {
-            document.getElementById("wcSource").innerText =
-              "数据源：" + (d.source || "未知");
+            if (d.status === "error") {
+              throw new Error(d.msg || "生成词云失败");
+            }
+            document.getElementById("wcStatus").innerText = 
+              `词云生成完成（已选择 ${selectedNewsIds.size} 条新闻）`;
             renderWordCloud(d.words || []);
+            // 确保图表在可见尺寸下渲染
+            setTimeout(() => {
+              wordChart.resize();
+            }, 0);
           })
           .catch((e) => {
-            document.getElementById("wcSource").innerText = "请求失败：" + e;
+            const errorMsg = e.message || String(e);
+            document.getElementById("wcStatus").innerText = "生成失败：" + errorMsg;
+            console.error("词云生成错误:", e);
+            alert("生成词云失败：" + errorMsg);
+          })
+          .finally(() => {
+            btn.disabled = false;
+            btn.textContent = originalText;
           });
       });
 
-      // 评分系统
-      document.getElementById("sentBtn").addEventListener("click", function () {
-        const fd = new FormData();
-        const file = document.getElementById("sentFile").files[0];
-        if (file) fd.append("file", file);
-        fd.append("text_data", document.getElementById("sentText").value);
-        fd.append("table_name", document.getElementById("sentTable").value);
-        fetch("/api/sentiment_score", { method: "POST", body: fd })
-          .then((r) => r.json())
-          .then((d) => {
-            document.getElementById("sentSource").innerText =
-              "数据源：" + (d.source || "未知");
-            const s = d.sentiment || {};
-            const p = Math.round((s.positive || 0) * 100);
-            const n = Math.round((s.neutral || 0) * 100);
-            const g = Math.round((s.negative || 0) * 100);
-            document.getElementById("sentPosText2").innerText = `正向 ${p}%`;
-            document.getElementById("sentNeuText2").innerText = `中性 ${n}%`;
-            document.getElementById("sentNegText2").innerText = `负向 ${g}%`;
-            document.getElementById("sentHeat").innerText = `热度 ${(d.heat || 0).toFixed(2)}`;
-            document.getElementById("sentRisk").innerText = d.risk ?? "-";
-            // 同时更新顶部情感条便于复用
-            updateSentimentBar(s);
-          })
-          .catch((e) => {
-            document.getElementById("sentSource").innerText = "请求失败：" + e;
-          });
-      });
 
       // MySQL 机器学习预测（回归 / 分类 / 聚类）
       const mlBtn = document.getElementById("mlBtn");
@@ -1836,6 +1833,8 @@
             updateFlashSentimentBar(d.sentiment || {});
             renderFlashSentimentChart(d.items || []); // 渲染情感比例饼图
             renderFlashWordCloud(d.words || []);
+            // 调试：检查来源分布数据
+            console.log("来源分布数据:", d.source_stats);
             renderFlashSourceChart(d.source_stats || []);
             renderFlashLenChart(d.length_buckets || []);
             document.getElementById("flashStatus").innerText = `完成：共 ${d.rows || 0} 条菁融短讯${keyword ? `（关键词: ${keyword}）` : ""}`;
@@ -1843,6 +1842,8 @@
             setTimeout(() => {
               flashWordChart.resize();
               flashSentimentChart.resize();
+              flashSourceChart.resize();
+              flashLenChart.resize();
             }, 0);
           })
           .catch((e) => {
@@ -1961,6 +1962,10 @@
               throw new Error(d.msg || "查询失败");
             }
             renderStockRange(d.dates || [], d.cum_change || [], d.ts_code);
+            // 渲染因子模型与回归分析散点图
+            if (d.factor_model) {
+              renderStockFactorModel(d.factor_model, d.ts_code);
+            }
           })
           .catch((e) => {
             alert("区间涨幅查询失败：" + e.message);
@@ -2004,114 +2009,15 @@
           });
       });
 
-      document
-        .getElementById("analyzeBtn")
-        .addEventListener("click", function () {
-          const formData = new FormData();
-
-          // 数据部分
-          const file = document.getElementById("fileInput").files[0];
-          if (file) {
-            formData.append("file", file);
-          }
-          formData.append(
-            "text_data",
-            document.getElementById("textData").value
-          );
-          formData.append(
-            "dataset",
-            document.getElementById("datasetSelect").value
-          );
-          formData.append("x_col", document.getElementById("xCol").value);
-          formData.append("y_col", document.getElementById("yCol").value);
-
-          // 文本与 AI 分析部分
-          formData.append("doc_text", document.getElementById("docText").value);
-
-          document.getElementById("statusText").innerText = "正在分析，请稍候…";
-
-          fetch("/analyze", {
-            method: "POST",
-            body: formData,
-          })
-            .then((res) => {
-              if (!res.ok) {
-                return res.json().then(data => {
-                  throw new Error(data.msg || `HTTP ${res.status}`);
-                });
-              }
-              return res.json();
-            })
-            .then((data) => {
-              if (data.status === "error") {
-                throw new Error(data.msg || "分析失败");
-              }
-              
-              document.getElementById("statusText").innerText = "分析完成 ✓";
-              document.getElementById("statusText").className = "small text-success";
-
-              // 更新数值摘要
-              document.getElementById("xyLabel").innerText =
-                "(X 轴：" + data.x_col + "，Y 轴：" + data.y_col + ")";
-              document.getElementById("summaryBox").innerText =
-                data.summary || "未获得有效的统计摘要，请检查数据。";
-
-              // 更新 AI 摘要
-              document.getElementById("aiSummary").innerText =
-                data.ai_summary ||
-                "未输入金融文本，暂无法给出 AI 摘要示例。";
-
-              // 更新情感条
-              updateSentimentBar(data.sentiment || {});
-
-              // 更新输出文件列表
-              const files = data.files || [];
-              const span = document.getElementById("savedFiles");
-              if (files.length > 0) {
-                span.innerHTML =
-                  "分析结果文件已保存在后端，可通过以下链接下载：" +
-                  files
-                    .map((p) => {
-                      const name = p.split(/[\\/]/).slice(-1)[0];
-                      return (
-                        '<a href="/files/' +
-                        name +
-                        '" target="_blank" class="me-2">' +
-                        name +
-                        "</a>"
-                      );
-                    })
-                    .join("");
-              } else {
-                span.innerHTML = "";
-              }
-
-              // 更新五类图表
-              updateCharts(data);
-            })
-            .catch((err) => {
-              console.error(err);
-              document.getElementById("statusText").innerText =
-                "分析失败：" + err.message;
-              document.getElementById("statusText").className = "small text-danger";
-              
-              // 显示错误提示
-              alert("分析失败：" + err.message + "\n请检查数据格式或网络连接。");
-            });
-        });
 
       // 自适应窗口尺寸
       window.addEventListener("resize", function () {
-        chartLine.resize();
-        chartBar.resize();
-        chartPie.resize();
-        chartScatter.resize();
-        chartBox.resize();
         wordChart.resize();
         predictChart.resize();
       });
     </script>
   </body>
 </html>
+
 
 
