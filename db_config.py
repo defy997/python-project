@@ -8,8 +8,8 @@ DB_CONFIG = {
     "host": "127.0.0.1",   # MySQL 服务器地址
     "port": 3306,          # 端口
     "user": "root",        # 用户名（请改成你自己的）
-    "password": "142857",  # 密码（请改成你自己的）
-    "database": "finance_db",  # 数据库名称（需要提前在 MySQL 中创建）
+    "password": "264510",  # 密码（请改成你自己的）
+    "database": "financial_analysis",  # 数据库名称（需要提前在 MySQL 中创建）
     "charset": "utf8mb4",  # 字符集
 }
 

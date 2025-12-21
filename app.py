@@ -2672,89 +2672,6 @@ def api_ts_stock_range():
     return jsonify(result)
 
 
-@app.route("/api/ts_stock_predict", methods=["POST"])
-@handle_api_errors
-def api_ts_stock_predict():
-    """
-    函数名称：api_ts_stock_predict
-    函数功能：对单只股票（ts_code）进行简单预测：
-        1. 优先从 MySQL ts_stock_daily 表读取历史收盘价；
-        2. 若数据不足，则自动调用 TuShare daily 爬取并保存；
-        3. 使用一阶线性拟合，对未来 horizon 个交易日做外推预测。
-    前端参数：
-        ts_code：股票代码（如 600519.SH）；
-        horizon：预测步数（3~60，默认 8）。
-    返回值：
-        JSON：{history: [...], forecast: [...]}，均为 [{date, value}] 列表。
-    """
-    if ts is None:
-        return jsonify({"status": "error", "msg": "当前环境未安装 tushare 库"}), 500
-    if not TUSHARE_TOKEN:
-        return jsonify({"status": "error", "msg": "未配置 TuShare Token"}), 500
-
-    ts_code = request.form.get("ts_code", "").strip()
-    if not ts_code:
-        return jsonify({"status": "error", "msg": "ts_code 不能为空"}), 400
-    try:
-        horizon = int(request.form.get("horizon", "8") or 8)
-    except ValueError:
-        horizon = 8
-    horizon = max(3, min(horizon, 60))
-
-    # 1) 尝试从 MySQL 读取
-    series = _load_price_series_from_mysql("ts_stock_daily", "ts_code", ts_code, min_rows=20)
-
-    # 2) 若数据不足，则调用 TuShare daily 爬取近一年数据并写入，再次读取
-    if not series:
-        pro = ts.pro_api(TUSHARE_TOKEN)
-        end_date = datetime.today()
-        start_date = end_date - timedelta(days=365)
-        end_str = end_date.strftime("%Y%m%d")
-        start_str = start_date.strftime("%Y%m%d")
-        df = pd.DataFrame()
-        try:
-            df = pro.daily(ts_code=ts_code, start_date=start_str, end_date=end_str)
-        except Exception as e:
-            logger.error(f"TuShare 拉取股票 {ts_code} 预测数据失败: {e}")
-        if not df.empty:
-            try:
-                saved = _save_tushare_stock_daily_to_mysql(df)
-                logger.info(f"股票 {ts_code} 预测前已写入 ts_stock_daily，记录数: {saved}")
-            except Exception as e:
-                logger.warning(f"股票 {ts_code} 写入 ts_stock_daily 失败: {e}")
-            series = _load_price_series_from_mysql("ts_stock_daily", "ts_code", ts_code, min_rows=20)
-
-    if not series:
-        return jsonify({"status": "error", "msg": f"股票 {ts_code} 在数据库和 TuShare 中均无足够数据"}), 400
-
-    y = np.array([s["close"] for s in series], dtype=float)
-    x = np.arange(len(y))
-    if len(y) < 5:
-        return jsonify({"status": "error", "msg": "数据量过少，无法预测"}), 400
-
-    coef = np.polyfit(x, y, deg=1)
-    poly = np.poly1d(coef)
-    future_x = np.arange(len(y), len(y) + horizon)
-    future_y = poly(future_x)
-
-    history = [{"date": series[i]["date"], "value": float(v)} for i, v in enumerate(y.tolist())]
-    last_date = datetime.strptime(series[-1]["date"], "%Y-%m-%d")
-    forecast = []
-    for i, v in enumerate(future_y.tolist(), start=1):
-        d = last_date + timedelta(days=i)
-        forecast.append({"date": d.strftime("%Y-%m-%d"), "value": float(v)})
-
-    return jsonify(
-        {
-            "status": "ok",
-            "ts_code": ts_code,
-            "horizon": horizon,
-            "history": history,
-            "forecast": forecast,
-        }
-    )
-
-
 @app.route("/api/run_ml", methods=["POST"])
 @handle_api_errors
 def api_run_ml():
@@ -2793,6 +2710,11 @@ def api_run_ml():
         logger.error(f"从 MySQL 读取数据失败: {e}")
         return jsonify({"status": "error", "msg": f"读取数据库失败: {str(e)}"}), 500
 
+    # --- 新增逻辑：过滤非数值列，防止 datetime.date 导致算法报错 ---
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    feature_cols = [c for c in feature_cols if c in numeric_cols]
+    # ---------------------------------------------------------
+
     # 验证数据
     validation = validate_dataframe(df, min_rows=10, required_cols=feature_cols)
     if not validation["valid"]:
@@ -2804,7 +2726,13 @@ def api_run_ml():
     # 1. 回归
     if target_col and target_col in df.columns:
         try:
-            reg_res: MLResult = run_regression(df, feature_cols, target_col)
+            # --- 新增逻辑：从特征中剔除目标列，防止数据泄露并解决维度冲突 ---
+            final_reg_features = [c for c in feature_cols if c != target_col]
+            if not final_reg_features:
+                raise ValueError("剔除目标列后，有效数值特征为空")
+            # ---------------------------------------------------------
+
+            reg_res: MLResult = run_regression(df, final_reg_features, target_col)
             results["regression"] = {
                 "metrics": reg_res.metrics,
                 "preview": reg_res.preview.to_dict(orient="records"),
@@ -2816,7 +2744,11 @@ def api_run_ml():
 
         # 2. 分类（基于同一个连续目标）
         try:
-            cls_res: MLResult = run_classification(df, feature_cols, target_col)
+            # --- 新增逻辑：同上，确保特征不包含目标列 ---
+            final_cls_features = [c for c in feature_cols if c != target_col]
+            # ---------------------------------------
+
+            cls_res: MLResult = run_classification(df, final_cls_features, target_col)
             results["classification"] = {
                 "metrics": cls_res.metrics,
                 "preview": cls_res.preview.to_dict(orient="records"),
@@ -2828,7 +2760,9 @@ def api_run_ml():
         # 若指定了预测步数，则基于目标列做简单时间序列线性外推
         if horizon > 0:
             try:
-                y_series = df[target_col].astype(float).values
+                # --- 新增逻辑：确保序列为纯数值，处理可能存在的非数值或空值 ---
+                y_series = pd.to_numeric(df[target_col], errors='coerce').dropna().values
+                # ---------------------------------------------------------
                 x = np.arange(len(y_series))
                 if len(y_series) >= 5:
                     coef = np.polyfit(x, y_series, deg=1)
